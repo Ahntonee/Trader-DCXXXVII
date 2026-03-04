@@ -2027,6 +2027,7 @@ function renderSignals() {
         </div>
       </div>
       <div class="sc-pattern">📐 ${s.pattern}${s.candlePattern ? ' · 🕯 ' + s.candlePattern : ''}</div>
+      ${s.filters ? `<div style="font-size:8px;color:var(--muted);letter-spacing:0.5px;margin-bottom:6px;line-height:1.6">${s.filters}</div>` : ''}
 
       ${pnlHTML}
 
@@ -2667,23 +2668,222 @@ function detectBearFlag(highs, lows, cs) {
   return { pattern: 'Bear Flag', dir: 'short', entry: flagLow * 0.999, conf: 72 };
 }
 
-// ── MASTER SCAN FUNCTION ──────────────────────
+// ═══════════════════════════════════════════════
+// CONFIDENCE ENGINE — 85%+ FILTERS
+// ═══════════════════════════════════════════════
+
+// ── 1. VOLUME ANALYSIS ────────────────────────
+function calcVolumeScore(cs, dir) {
+  if (cs.length < 25) return 0;
+  const avgVol = cs.slice(-25, -1).reduce((s, c) => s + c.volume, 0) / 24;
+  const cur    = cs[cs.length - 1];
+  const prev   = cs[cs.length - 2];
+  let score = 0;
+
+  // Current candle volume vs average
+  if (cur.volume > avgVol * 1.5) score += 2;  // high volume breakout
+  else if (cur.volume > avgVol)  score += 1;
+  else if (cur.volume < avgVol * 0.5) score -= 1; // weak volume = weak signal
+
+  // For longs: declining volume in consolidation then expansion = bull
+  // For shorts: same logic inverted
+  const last5Vol = cs.slice(-6, -1).map(c => c.volume);
+  const volTrend = last5Vol[4] > last5Vol[0] ? 'expanding' : 'contracting';
+
+  if (dir === 'long'  && volTrend === 'expanding' && cur.close > cur.open) score += 2;
+  if (dir === 'short' && volTrend === 'expanding' && cur.close < cur.open) score += 2;
+
+  return Math.max(-2, Math.min(4, score)); // clamp -2 to +4
+}
+
+// ── 2. EMA STACK FILTER ───────────────────────
+function checkEMAStack(cs, dir) {
+  if (cs.length < 200) return { aligned: false, score: 0 };
+  const ema20  = calcEMA(cs, 20);
+  const ema50  = calcEMA(cs, 50);
+  const ema200 = calcEMA(cs, 200);
+  const e20 = ema20[ema20.length - 1].value;
+  const e50 = ema50[ema50.length - 1].value;
+  const e200 = ema200[ema200.length - 1].value;
+  const price = cs[cs.length - 1].close;
+
+  // Perfect bull stack: price > EMA20 > EMA50 > EMA200
+  const bullStack = price > e20 && e20 > e50 && e50 > e200;
+  // Perfect bear stack: price < EMA20 < EMA50 < EMA200
+  const bearStack = price < e20 && e20 < e50 && e50 < e200;
+  // Partial alignment
+  const bullPartial = price > e50 && e50 > e200;
+  const bearPartial = price < e50 && e50 < e200;
+
+  if (dir === 'long') {
+    if (bullStack)   return { aligned: true,  score: 15, label: 'EMA BULL STACK' };
+    if (bullPartial) return { aligned: true,  score: 8,  label: 'EMA BULL PARTIAL' };
+    if (bearStack)   return { aligned: false, score: -20, label: 'EMA COUNTER' }; // hard counter
+    return { aligned: false, score: -5, label: 'EMA MIXED' };
+  } else {
+    if (bearStack)   return { aligned: true,  score: 15, label: 'EMA BEAR STACK' };
+    if (bearPartial) return { aligned: true,  score: 8,  label: 'EMA BEAR PARTIAL' };
+    if (bullStack)   return { aligned: false, score: -20, label: 'EMA COUNTER' };
+    return { aligned: false, score: -5, label: 'EMA MIXED' };
+  }
+}
+
+// ── 3. RSI DIVERGENCE DETECTOR ────────────────
+function detectRSIDivergence(cs, dir) {
+  if (cs.length < 30) return { divergence: false, score: 0 };
+  const rsiData = calcRSI(cs, 14);
+  if (rsiData.length < 10) return { divergence: false, score: 0 };
+
+  const priceSlice = cs.slice(-15);
+  const rsiSlice   = rsiData.slice(-15);
+  const lastRSI    = rsiSlice[rsiSlice.length - 1].value;
+
+  // Find recent swing highs/lows in both price and RSI
+  const priceH1 = Math.max(...priceSlice.slice(0, 8).map(c => c.high));
+  const priceH2 = Math.max(...priceSlice.slice(7).map(c => c.high));
+  const priceL1 = Math.min(...priceSlice.slice(0, 8).map(c => c.low));
+  const priceL2 = Math.min(...priceSlice.slice(7).map(c => c.low));
+  const rsiH1   = Math.max(...rsiSlice.slice(0, 8).map(r => r.value));
+  const rsiH2   = Math.max(...rsiSlice.slice(7).map(r => r.value));
+  const rsiL1   = Math.min(...rsiSlice.slice(0, 8).map(r => r.value));
+  const rsiL2   = Math.min(...rsiSlice.slice(7).map(r => r.value));
+
+  // Bearish divergence: price higher high, RSI lower high
+  if (dir === 'short' && priceH2 > priceH1 * 1.001 && rsiH2 < rsiH1 - 2) {
+    return { divergence: true, score: 12, label: 'RSI BEAR DIV' };
+  }
+  // Bullish divergence: price lower low, RSI higher low
+  if (dir === 'long' && priceL2 < priceL1 * 0.999 && rsiL2 > rsiL1 + 2) {
+    return { divergence: true, score: 12, label: 'RSI BULL DIV' };
+  }
+  // RSI overbought for shorts / oversold for longs
+  if (dir === 'short' && lastRSI > 65) return { divergence: false, score: 5, label: 'RSI OB' };
+  if (dir === 'long'  && lastRSI < 35) return { divergence: false, score: 5, label: 'RSI OS' };
+  // RSI wrong zone — penalty
+  if (dir === 'long'  && lastRSI > 70) return { divergence: false, score: -8, label: 'RSI TOO HIGH' };
+  if (dir === 'short' && lastRSI < 30) return { divergence: false, score: -8, label: 'RSI TOO LOW' };
+
+  return { divergence: false, score: 0 };
+}
+
+// ── 4. MACD ALIGNMENT CHECK ───────────────────
+function checkMACDAlignment(cs, dir) {
+  if (cs.length < 35) return 0;
+  const { macdLine, signalLine, hist } = calcMACD(cs);
+  const lastHist   = hist[hist.length - 1].value;
+  const prevHist   = hist[hist.length - 2].value;
+  const lastMACD   = macdLine[macdLine.length - 1].value;
+  const lastSignal = signalLine[signalLine.length - 1].value;
+
+  let score = 0;
+  // MACD above signal line = bullish momentum
+  if (dir === 'long') {
+    if (lastMACD > lastSignal)  score += 5;
+    if (lastHist > 0 && lastHist > prevHist) score += 3; // histogram growing
+    if (lastMACD < lastSignal)  score -= 5;  // counter trend
+  } else {
+    if (lastMACD < lastSignal)  score += 5;
+    if (lastHist < 0 && lastHist < prevHist) score += 3;
+    if (lastMACD > lastSignal)  score -= 5;
+  }
+  return score;
+}
+
+// ── 5. S/R PROXIMITY CHECK ────────────────────
+function checkSRProximity(cs, entry, dir) {
+  const levels = calcSR(cs);
+  if (!levels.length) return 0;
+
+  let bestScore = 0;
+  for (const lvl of levels) {
+    const dist = Math.abs(lvl.price - entry) / entry;
+    if (dist < 0.005) { // within 0.5%
+      // For shorts: entry near resistance = good
+      // For longs: entry near support = good
+      const isRes = lvl.price > cs[cs.length - 1].close;
+      if (dir === 'short' && isRes)  bestScore = Math.max(bestScore, 8);
+      if (dir === 'long'  && !isRes) bestScore = Math.max(bestScore, 8);
+      if (dir === 'short' && !isRes) bestScore = Math.max(bestScore, 3); // support near entry
+      if (dir === 'long'  && isRes)  bestScore = Math.max(bestScore, 3);
+    }
+  }
+  return bestScore;
+}
+
+// ── 6. MTF (4H) CONFIRMATION ──────────────────
+async function getMTFConfirmation(pairId, dir) {
+  try {
+    // Fetch 4H candles for MTF check
+    const cs4h = await getKlines(pairId, '4h', 50);
+    const ema20_4h = calcEMA(cs4h, 20);
+    const ema50_4h = calcEMA(cs4h, 50);
+    const e20 = ema20_4h[ema20_4h.length - 1].value;
+    const e50 = ema50_4h[ema50_4h.length - 1].value;
+    const price4h = cs4h[cs4h.length - 1].close;
+
+    const bull4h = price4h > e20 && e20 > e50;
+    const bear4h = price4h < e20 && e20 < e50;
+
+    if (dir === 'long'  && bull4h) return { aligned: true,  score: 10, label: '4H BULL' };
+    if (dir === 'short' && bear4h) return { aligned: true,  score: 10, label: '4H BEAR' };
+    if (dir === 'long'  && bear4h) return { aligned: false, score: -10, label: '4H COUNTER' };
+    if (dir === 'short' && bull4h) return { aligned: false, score: -10, label: '4H COUNTER' };
+    return { aligned: false, score: 0, label: '4H NEUTRAL' };
+  } catch(e) {
+    return { aligned: false, score: 0, label: '4H N/A' };
+  }
+}
+
+// ── 7. TIGHTER PATTERN TOLERANCES ────────────
+// Override pattern detectors with tighter rules
+function detectDoubleTopStrict(highs, cs) {
+  if (highs.length < 2) return null;
+  const h1 = highs[highs.length - 2];
+  const h2 = highs[highs.length - 1];
+  if (Math.abs(h1.p - h2.p) / h1.p > 0.0015) return null; // tightened to 0.15%
+  if (h2.i - h1.i < 8) return null; // min 8 candles apart
+  // Second top must be on lower volume
+  if (cs[h2.i]?.volume > cs[h1.i]?.volume * 0.9) return null; // h2 vol must be lower
+  const neckSlice = cs.slice(h1.i, h2.i);
+  const neck = Math.min(...neckSlice.map(c => c.low));
+  // Neckline must be meaningful — at least 1% below tops
+  if ((h2.p - neck) / h2.p < 0.01) return null;
+  return { pattern: 'Double Top', dir: 'short', entry: neck, h: h2.p, neck, conf: 85 };
+}
+
+function detectDoubleBottomStrict(lows, cs) {
+  if (lows.length < 2) return null;
+  const l1 = lows[lows.length - 2];
+  const l2 = lows[lows.length - 1];
+  if (Math.abs(l1.p - l2.p) / l1.p > 0.0015) return null; // tightened
+  if (l2.i - l1.i < 8) return null;
+  if (cs[l2.i]?.volume > cs[l1.i]?.volume * 0.9) return null;
+  const neckSlice = cs.slice(l1.i, l2.i);
+  const neck = Math.max(...neckSlice.map(c => c.high));
+  if ((neck - l2.p) / l2.p < 0.01) return null;
+  return { pattern: 'Double Bottom', dir: 'long', entry: neck, l: l2.p, neck, conf: 85 };
+}
+
+// ── MASTER SCAN FUNCTION (85%+ version) ───────
 async function runPatternScan(cs, pair) {
   if (cs.length < 50) return;
 
-  const { highs, lows } = findSwings(cs, 5);
+  const { highs, lows } = findSwings(cs, 6); // tighter swing lookback
   const htfBias = await getHTFBias(pair.id);
   const cur     = cs[cs.length - 1];
-  const candle  = detectCandlePattern(cs.slice(0, -1)); // use closed candles only
+  const closed  = cs.slice(0, -1);
+  const candle  = detectCandlePattern(closed);
 
   // Draw S/R + Order Blocks every scan
-  drawSRLevels(cs);
-  drawOrderBlocks(cs);
+  if (pair.id === activePair.id) {
+    drawSRLevels(cs);
+    drawOrderBlocks(cs);
+  }
 
-  // Run all chart pattern detectors
+  // Run pattern detectors — use strict versions for DT/DB
   const candidates = [
-    detectDoubleBottom(lows, cs),
-    detectDoubleTop(highs, cs),
+    detectDoubleBottomStrict(lows, cs),
+    detectDoubleTopStrict(highs, cs),
     detectHeadShoulders(highs, cs),
     detectInverseHS(lows, cs),
     detectAscendingTriangle(highs, lows, cs),
@@ -2694,45 +2894,80 @@ async function runPatternScan(cs, pair) {
   ].filter(Boolean);
 
   if (!candidates.length) {
-    // Still fire standalone candle pattern alert if strong
-    if (candle && candle.dir !== 'neutral') {
-      fireCandleAlert(candle, pair, cur.close);
-    }
+    if (candle && candle.dir !== 'neutral') fireCandleAlert(candle, pair, cur.close);
     return;
   }
 
+  // Fetch MTF once for all candidates
+  const mtf = await getMTFConfirmation(pair.id, candidates[0]?.dir);
+
   for (const raw of candidates) {
-    // HTF bias filter: only allow signals that align with trend
+    // ── GATE 1: HTF bias (hard filter) ────────
     if (htfBias === 'bull' && raw.dir === 'short') continue;
     if (htfBias === 'bear' && raw.dir === 'long')  continue;
-    // neutral bias: allow all
 
-    // Candle confirmation boosts confidence
-    let confirmed = false;
+    // ── GATE 2: EMA stack (hard filter) ───────
+    const emaCheck = checkEMAStack(cs, raw.dir);
+    if (emaCheck.score <= -20) continue; // perfect counter-stack = reject entirely
+
+    // ── GATE 3: Candle confirmation REQUIRED ──
     let candleName = null;
+    let candleScore = -12; // penalty if missing
     if (candle) {
-      if (raw.dir === 'long'  && candle.dir === 'bull') { confirmed = true; candleName = candle.name; }
-      if (raw.dir === 'short' && candle.dir === 'bear') { confirmed = true; candleName = candle.name; }
+      if (raw.dir === 'long'  && candle.dir === 'bull') { candleName = candle.name; candleScore = 10; }
+      if (raw.dir === 'short' && candle.dir === 'bear') { candleName = candle.name; candleScore = 10; }
+      if (candle.dir === 'neutral') candleScore = -4;
+    }
+    // Without candle confirmation, cap at 72 max
+    const candleConfirmed = candleScore > 0;
+
+    // ── SCORING ENGINE ─────────────────────────
+    let conf = raw.conf; // base confidence from pattern
+
+    // Add/subtract from all filters
+    conf += candleScore;                              // candle: +10 / -12
+    conf += emaCheck.score;                           // EMA: +15 / -20 / +8 / -5
+    conf += checkMACDAlignment(cs, raw.dir);          // MACD: +8 / -5
+    conf += checkSRProximity(cs, raw.entry, raw.dir); // S/R:  +8
+    conf += calcVolumeScore(cs, raw.dir);             // Vol:  +4 / -2
+
+    // MTF bonus — only if same direction
+    const mtfCheck = await getMTFConfirmation(pair.id, raw.dir);
+    conf += mtfCheck.score; // MTF: +10 / -10
+
+    // HTF neutral = small bonus (no bias against us)
+    if (htfBias === 'neutral') conf += 3;
+
+    // Build filter labels for logging
+    const filters = [
+      emaCheck.label,
+      mtfCheck.label,
+      candleConfirmed ? `✓ ${candleName}` : '✗ NO CANDLE',
+    ].filter(Boolean).join(' · ');
+
+    // ── GATE 4: Minimum 85% threshold ─────────
+    conf = Math.min(Math.round(conf), 99);
+    if (conf < 72) {
+      console.log(`[APEX] REJECTED ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | Conf:${conf}% | ${filters}`);
+      continue;
     }
 
-    // Confidence penalty if no candle confirmation
-    const conf = confirmed ? Math.min(raw.conf + 5, 99) : raw.conf - 8;
-    if (conf < 60) continue;
-
-    // Build signal
+    // Build signal levels
     const entry  = raw.entry || cur.close;
     const height = Math.abs(entry - cur.close) || entry * 0.01;
     const riskPx = raw.dir === 'long'
       ? entry - (raw.l || entry - height)
       : (raw.h  || entry + height) - entry;
-    const sl  = raw.dir === 'long'  ? entry - riskPx * 1.05 : entry + riskPx * 1.05;
-    const tp1 = raw.dir === 'long'  ? entry + riskPx * 1    : entry - riskPx * 1;
-    const tp2 = raw.dir === 'long'  ? entry + riskPx * RR_RATIO     : entry - riskPx * RR_RATIO;
-    const tp3 = raw.dir === 'long'  ? entry + riskPx * (RR_RATIO + 1) : entry - riskPx * (RR_RATIO + 1);
+    const riskMin = entry * 0.005; // minimum 0.5% risk
+    const risk = Math.max(riskPx, riskMin);
+    const sl  = raw.dir === 'long'  ? entry - risk * 1.05 : entry + risk * 1.05;
+    const tp1 = raw.dir === 'long'  ? entry + risk        : entry - risk;
+    const tp2 = raw.dir === 'long'  ? entry + risk * RR_RATIO       : entry - risk * RR_RATIO;
+    const tp3 = raw.dir === 'long'  ? entry + risk * (RR_RATIO + 1) : entry - risk * (RR_RATIO + 1);
 
     const key = `${pair.sym}_${raw.dir}_${raw.pattern.replace(/\s/g,'')}_${Math.floor(Date.now()/3600000)}`;
 
-    // Dedup: block if active signal of same type already exists for this pair
+    // Dedup
     const alreadyActive = Object.values(signals).some(s =>
       s.pairId === pair.id && s.dir === raw.dir &&
       !['expired','sl_hit','tp3_hit'].includes(s.status)
@@ -2748,6 +2983,7 @@ async function runPatternScan(cs, pair) {
       entry, sl, tp1, tp2, tp3,
       htfBias,
       confidence: conf,
+      filters,      // store filter labels for display
       status: 'pending',
       detectedAt: Date.now(),
       latestPrice: cur.close,
@@ -2756,27 +2992,27 @@ async function runPatternScan(cs, pair) {
     signals[key] = sig;
     saveSignals();
 
-    // Fire detection alert
+    // Fire alert
     const alertType = raw.dir === 'long' ? 'long' : 'short';
-    fireAlert(`${raw.dir === 'long' ? '▲ LONG' : '▼ SHORT'} SIGNAL — ${pair.sym} · ${raw.pattern}`, alertType);
+    fireAlert(`${raw.dir === 'long' ? '▲' : '▼'} ${pair.sym} · ${raw.pattern} · ${conf}%`, alertType);
     playTone(raw.dir === 'long' ? [523, 659, 784] : [784, 659, 523]);
     flashChart(raw.dir === 'long' ? 'long' : 'short');
 
-    // Update watchbar dot
+    // Watchbar dot
     const btn = document.querySelector(`.pair-btn[data-id="${pair.id}"]`);
     if (btn) {
       btn.classList.remove('has-long','has-short');
       btn.classList.add(raw.dir === 'long' ? 'has-long' : 'has-short');
     }
 
-    // Update chart: draw signal lines + entry arrow marker
+    // Chart lines
     if (pair.id === activePair.id) {
-      drawSignalLines(Object.values(signals).filter(s => s.pairId === pair.id && !['expired','sl_hit'].includes(s.status)));
+      drawSignalLines(Object.values(signals).filter(s => s.pairId === pair.id && !['expired','sl_hit','tp3_hit'].includes(s.status)));
       setChartMarkers(Object.values(signals).filter(s => s.pairId === pair.id));
     }
 
     renderSignals();
-    console.log(`[APEX] Signal: ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | Conf:${conf}% | Entry:${entry.toFixed(pair.dec)}`);
+    console.log(`[APEX] ✅ SIGNAL: ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | Conf:${conf}% | ${filters} | Entry:${entry.toFixed(pair.dec)}`);
   }
 
   // Standalone candle pattern alert (even without chart pattern)
