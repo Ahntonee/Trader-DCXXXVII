@@ -975,7 +975,7 @@ const PAIRS = [
   { id:'DOGEUSDT',  sym:'DOGE',  dec:5, minMove:0.00001 },
   { id:'MATICUSDT', sym:'MATIC', dec:4, minMove:0.0001 },
   { id:'AVAXUSDT',  sym:'AVAX',  dec:3, minMove:0.001 },
-  { id:'XAUUSDT',   sym:'XAU',   dec:2, minMove:0.01 },
+  { id:'XAUUSDT',   sym:'XAU',   dec:2, minMove:0.01, proxyOnly: true },
 ];
 
 const RR_RATIO   = 2;    // default 1:2
@@ -1486,6 +1486,8 @@ function connectWS(pair, tf) {
         if (k.x) {
           updateIndicators(candles);
           if (showChannel) drawChannel(candles);
+          // Run full pattern scan on closed candle
+          onCandleClosed(candles, pair);
         }
       }
     }
@@ -1696,6 +1698,10 @@ async function loadPair(pair, tf) {
     // Update watchbar prices
     updateWatchbarItem(pair.id, price, change);
 
+    // Draw S/R levels and Order Blocks immediately on load
+    drawSRLevels(cs);
+    drawOrderBlocks(cs);
+
     // Render signals
     renderSignals();
 
@@ -1887,6 +1893,7 @@ function buildWatchbar() {
 function updateWatchbarItem(pairId, price, chg) {
   const el = document.getElementById('chg-' + pairId);
   if (!el) return;
+  if (isNaN(chg) || chg == null) { el.textContent = ''; return; }
   el.textContent = fmtPct(chg);
   el.className   = 'chg ' + (chg >= 0 ? 'up' : 'dn');
 }
@@ -1980,6 +1987,469 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 // ═══════════════════════════════════════════════
+// PHASE 2 — PATTERN DETECTION ENGINE
+// ═══════════════════════════════════════════════
+
+// ── SWING POINTS ──────────────────────────────
+function findSwings(cs, lb = 5) {
+  const highs = [], lows = [];
+  for (let i = lb; i < cs.length - lb; i++) {
+    let isH = true, isL = true;
+    for (let j = i - lb; j <= i + lb; j++) {
+      if (j === i) continue;
+      if (cs[j].high >= cs[i].high) isH = false;
+      if (cs[j].low  <= cs[i].low)  isL = false;
+    }
+    if (isH) highs.push({ i, p: cs[i].high, t: cs[i].time });
+    if (isL) lows.push({  i, p: cs[i].low,  t: cs[i].time });
+  }
+  return { highs, lows };
+}
+
+// ── SUPPORT & RESISTANCE ──────────────────────
+function calcSR(cs, lookback = 100) {
+  const slice = cs.slice(-lookback);
+  const { highs, lows } = findSwings(slice, 3);
+  const levels = [];
+  const all = [...highs.map(h => h.p), ...lows.map(l => l.p)];
+  const tol = (Math.max(...all) - Math.min(...all)) * 0.005;
+
+  all.forEach(price => {
+    const existing = levels.find(l => Math.abs(l.price - price) < tol);
+    if (existing) { existing.touches++; existing.price = (existing.price + price) / 2; }
+    else levels.push({ price, touches: 1 });
+  });
+
+  return levels
+    .filter(l => l.touches >= 2)
+    .sort((a, b) => b.touches - a.touches)
+    .slice(0, 8);
+}
+
+function drawSRLevels(cs) {
+  // Remove old SR lines
+  if (window._srLines) window._srLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} });
+  window._srLines = [];
+
+  const levels = calcSR(cs);
+  const cur = cs[cs.length - 1].close;
+
+  levels.forEach(lvl => {
+    const isRes = lvl.price > cur;
+    const l = candleSeries.createPriceLine({
+      price: lvl.price,
+      color: isRes ? 'rgba(255,61,87,0.35)' : 'rgba(0,230,118,0.35)',
+      lineWidth: 1,
+      lineStyle: 2,
+      axisLabelVisible: true,
+      title: isRes ? `R${lvl.touches}` : `S${lvl.touches}`,
+    });
+    window._srLines.push(l);
+  });
+}
+
+// ── ORDER BLOCKS (SMC) ────────────────────────
+function detectOrderBlocks(cs, lookback = 60) {
+  const slice = cs.slice(-lookback);
+  const blocks = [];
+
+  for (let i = 3; i < slice.length - 3; i++) {
+    const c = slice[i];
+    // Bullish OB: bearish candle followed by strong bullish move
+    if (c.close < c.open) { // bearish candle
+      const nextMove = slice.slice(i + 1, Math.min(i + 5, slice.length));
+      const bullish = nextMove.filter(n => n.close > n.open && (n.close - n.open) > (c.open - c.close) * 0.8);
+      if (bullish.length >= 1) {
+        blocks.push({ type: 'bull', high: c.open, low: c.low, time: c.time, idx: i });
+      }
+    }
+    // Bearish OB: bullish candle followed by strong bearish move
+    if (c.close > c.open) {
+      const nextMove = slice.slice(i + 1, Math.min(i + 5, slice.length));
+      const bearish = nextMove.filter(n => n.close < n.open && (n.open - n.close) > (c.close - c.open) * 0.8);
+      if (bearish.length >= 1) {
+        blocks.push({ type: 'bear', high: c.high, low: c.close, time: c.time, idx: i });
+      }
+    }
+  }
+  return blocks.slice(-4); // keep latest 4
+}
+
+function drawOrderBlocks(cs) {
+  if (window._obSeries) window._obSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
+  window._obSeries = [];
+
+  const blocks = detectOrderBlocks(cs);
+  blocks.forEach(ob => {
+    const s = chart.addLineSeries({
+      color: ob.type === 'bull' ? 'rgba(0,230,118,0.5)' : 'rgba(255,61,87,0.5)',
+      lineWidth: 1, lineStyle: 0,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    // Draw as horizontal box using two lines
+    const startTime = ob.time;
+    const endTime   = cs[cs.length - 1].time + 3600 * 10;
+    s.setData([
+      { time: startTime, value: ob.high },
+      { time: endTime,   value: ob.high },
+    ]);
+    const s2 = chart.addLineSeries({
+      color: ob.type === 'bull' ? 'rgba(0,230,118,0.5)' : 'rgba(255,61,87,0.5)',
+      lineWidth: 1, lineStyle: 0,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    s2.setData([
+      { time: startTime, value: ob.low },
+      { time: endTime,   value: ob.low },
+    ]);
+    window._obSeries.push(s, s2);
+  });
+}
+
+// ── CANDLESTICK PATTERN DETECTOR ──────────────
+function detectCandlePattern(cs) {
+  const len = cs.length;
+  if (len < 3) return null;
+  const c  = cs[len - 1]; // current (closed)
+  const p  = cs[len - 2]; // previous
+  const pp = cs[len - 3]; // 2 back
+
+  const body    = Math.abs(c.close - c.open);
+  const range   = c.high - c.low;
+  const upWick  = c.high - Math.max(c.open, c.close);
+  const dnWick  = Math.min(c.open, c.close) - c.low;
+  const bullC   = c.close > c.open;
+  const bearC   = c.close < c.open;
+  const bullP   = p.close > p.open;
+  const bearP   = p.close < p.open;
+  const bodyP   = Math.abs(p.close - p.open);
+
+  // Doji
+  if (body < range * 0.1 && range > 0) return { name: 'Doji', dir: 'neutral' };
+
+  // Hammer (bullish reversal at bottom)
+  if (bullC && dnWick > body * 2 && upWick < body * 0.5)
+    return { name: 'Hammer', dir: 'bull' };
+
+  // Shooting Star (bearish reversal at top)
+  if (bearC && upWick > body * 2 && dnWick < body * 0.5)
+    return { name: 'Shooting Star', dir: 'bear' };
+
+  // Inverted Hammer
+  if (bullC && upWick > body * 2 && dnWick < body * 0.3)
+    return { name: 'Inv. Hammer', dir: 'bull' };
+
+  // Pin Bar (bull)
+  if (bullC && dnWick > range * 0.6 && body < range * 0.3)
+    return { name: 'Pin Bar ▲', dir: 'bull' };
+
+  // Pin Bar (bear)
+  if (bearC && upWick > range * 0.6 && body < range * 0.3)
+    return { name: 'Pin Bar ▼', dir: 'bear' };
+
+  // Bullish Engulfing
+  if (bullC && bearP && c.open < p.close && c.close > p.open && body > bodyP * 1.1)
+    return { name: 'Bull Engulfing', dir: 'bull' };
+
+  // Bearish Engulfing
+  if (bearC && bullP && c.open > p.close && c.close < p.open && body > bodyP * 1.1)
+    return { name: 'Bear Engulfing', dir: 'bear' };
+
+  // Morning Star (3-candle bullish)
+  if (bullC && bearP && Math.abs(p.close - p.open) < Math.abs(pp.close - pp.open) * 0.3
+    && pp.close < pp.open && c.close > (pp.open + pp.close) / 2)
+    return { name: 'Morning Star', dir: 'bull' };
+
+  // Evening Star (3-candle bearish)
+  if (bearC && bullP && Math.abs(p.close - p.open) < Math.abs(pp.close - pp.open) * 0.3
+    && pp.close > pp.open && c.close < (pp.open + pp.close) / 2)
+    return { name: 'Evening Star', dir: 'bear' };
+
+  // Three White Soldiers
+  if (len >= 4) {
+    const ppp = cs[len - 4];
+    if ([ppp, pp, p, c].every(x => x.close > x.open) &&
+        p.close > pp.close && c.close > p.close &&
+        p.open > pp.open   && c.open  > p.open)
+      return { name: '3 White Soldiers', dir: 'bull' };
+  }
+
+  // Three Black Crows
+  if (len >= 4) {
+    const ppp = cs[len - 4];
+    if ([ppp, pp, p, c].every(x => x.close < x.open) &&
+        p.close < pp.close && c.close < p.close &&
+        p.open  < pp.open  && c.open  < p.open)
+      return { name: '3 Black Crows', dir: 'bear' };
+  }
+
+  // Inside Bar
+  if (c.high < p.high && c.low > p.low)
+    return { name: 'Inside Bar', dir: 'neutral' };
+
+  return null;
+}
+
+// ── CHART PATTERN DETECTORS ───────────────────
+
+function detectDoubleTop(highs, cs, tol = 0.003) {
+  if (highs.length < 2) return null;
+  const h1 = highs[highs.length - 2];
+  const h2 = highs[highs.length - 1];
+  if (Math.abs(h1.p - h2.p) / h1.p > tol) return null;
+  if (h2.i - h1.i < 5) return null;
+  const neckSlice = cs.slice(h1.i, h2.i);
+  const neck = Math.min(...neckSlice.map(c => c.low));
+  return { pattern: 'Double Top', dir: 'short', entry: neck, h: h2.p, neck, conf: 82 };
+}
+
+function detectDoubleBottom(lows, cs, tol = 0.003) {
+  if (lows.length < 2) return null;
+  const l1 = lows[lows.length - 2];
+  const l2 = lows[lows.length - 1];
+  if (Math.abs(l1.p - l2.p) / l1.p > tol) return null;
+  if (l2.i - l1.i < 5) return null;
+  const neckSlice = cs.slice(l1.i, l2.i);
+  const neck = Math.max(...neckSlice.map(c => c.high));
+  return { pattern: 'Double Bottom', dir: 'long', entry: neck, l: l2.p, neck, conf: 82 };
+}
+
+function detectHeadShoulders(highs, cs) {
+  if (highs.length < 5) return null;
+  const n = highs.length;
+  const ls = highs[n - 5], lh = highs[n - 4], h = highs[n - 3], rh = highs[n - 2], rs = highs[n - 1];
+  if (h.p <= lh.p || h.p <= rh.p) return null;
+  if (Math.abs(lh.p - rh.p) / lh.p > 0.03) return null;
+  if (ls.p > lh.p * 0.97 || rs.p > rh.p * 0.97) return null;
+  const neckL = cs.slice(lh.i, h.i).reduce((mn, c) => Math.min(mn, c.low), Infinity);
+  const neckR = cs.slice(h.i, rh.i).reduce((mn, c) => Math.min(mn, c.low), Infinity);
+  const neck  = (neckL + neckR) / 2;
+  return { pattern: 'Head & Shoulders', dir: 'short', entry: neck, neck, h: h.p, conf: 88 };
+}
+
+function detectInverseHS(lows, cs) {
+  if (lows.length < 5) return null;
+  const n = lows.length;
+  const ls = lows[n - 5], lh = lows[n - 4], h = lows[n - 3], rh = lows[n - 2], rs = lows[n - 1];
+  if (h.p >= lh.p || h.p >= rh.p) return null;
+  if (Math.abs(lh.p - rh.p) / lh.p > 0.03) return null;
+  const neckL = cs.slice(lh.i, h.i).reduce((mx, c) => Math.max(mx, c.high), -Infinity);
+  const neckR = cs.slice(h.i, rh.i).reduce((mx, c) => Math.max(mx, c.high), -Infinity);
+  const neck  = (neckL + neckR) / 2;
+  return { pattern: 'Inv. Head & Shoulders', dir: 'long', entry: neck, neck, l: h.p, conf: 88 };
+}
+
+function detectAscendingTriangle(highs, lows, cs) {
+  if (highs.length < 3 || lows.length < 3) return null;
+  const recHighs = highs.slice(-3);
+  const recLows  = lows.slice(-3);
+  const flatTop  = recHighs.every(h => Math.abs(h.p - recHighs[0].p) / recHighs[0].p < 0.008);
+  const risingLo = recLows[0].p < recLows[1].p && recLows[1].p < recLows[2].p;
+  if (!flatTop || !risingLo) return null;
+  const resist = recHighs[0].p;
+  return { pattern: 'Ascending Triangle', dir: 'long', entry: resist * 1.002, resist, conf: 75 };
+}
+
+function detectDescendingTriangle(highs, lows, cs) {
+  if (highs.length < 3 || lows.length < 3) return null;
+  const recHighs = highs.slice(-3);
+  const recLows  = lows.slice(-3);
+  const flatBot  = recLows.every(l => Math.abs(l.p - recLows[0].p) / recLows[0].p < 0.008);
+  const fallHi   = recHighs[0].p > recHighs[1].p && recHighs[1].p > recHighs[2].p;
+  if (!flatBot || !fallHi) return null;
+  const support = recLows[0].p;
+  return { pattern: 'Descending Triangle', dir: 'short', entry: support * 0.998, support, conf: 75 };
+}
+
+function detectSymTriangle(highs, lows, cs) {
+  if (highs.length < 3 || lows.length < 3) return null;
+  const recH = highs.slice(-3), recL = lows.slice(-3);
+  const fallingH = recH[0].p > recH[1].p && recH[1].p > recH[2].p;
+  const risingL  = recL[0].p < recL[1].p && recL[1].p < recL[2].p;
+  if (!fallingH || !risingL) return null;
+  const cur = cs[cs.length - 1].close;
+  const dir = cur > (recH[2].p + recL[2].p) / 2 ? 'long' : 'short';
+  return { pattern: 'Sym. Triangle', dir, entry: dir === 'long' ? recH[2].p * 1.002 : recL[2].p * 0.998, conf: 70 };
+}
+
+function detectBullFlag(highs, lows, cs) {
+  if (cs.length < 20) return null;
+  const recent = cs.slice(-20);
+  // Strong up move in first half, tight consolidation in second
+  const pole   = recent.slice(0, 8);
+  const flag   = recent.slice(8);
+  const poleMove = (pole[pole.length-1].close - pole[0].open) / pole[0].open;
+  if (poleMove < 0.04) return null;
+  const flagHigh = Math.max(...flag.map(c => c.high));
+  const flagLow  = Math.min(...flag.map(c => c.low));
+  if ((flagHigh - flagLow) / flagLow > 0.025) return null;
+  return { pattern: 'Bull Flag', dir: 'long', entry: flagHigh * 1.001, conf: 72 };
+}
+
+function detectBearFlag(highs, lows, cs) {
+  if (cs.length < 20) return null;
+  const recent = cs.slice(-20);
+  const pole   = recent.slice(0, 8);
+  const flag   = recent.slice(8);
+  const poleMove = (pole[0].open - pole[pole.length-1].close) / pole[0].open;
+  if (poleMove < 0.04) return null;
+  const flagHigh = Math.max(...flag.map(c => c.high));
+  const flagLow  = Math.min(...flag.map(c => c.low));
+  if ((flagHigh - flagLow) / flagLow > 0.025) return null;
+  return { pattern: 'Bear Flag', dir: 'short', entry: flagLow * 0.999, conf: 72 };
+}
+
+// ── MASTER SCAN FUNCTION ──────────────────────
+async function runPatternScan(cs, pair) {
+  if (cs.length < 50) return;
+
+  const { highs, lows } = findSwings(cs, 5);
+  const htfBias = await getHTFBias(pair.id);
+  const cur     = cs[cs.length - 1];
+  const candle  = detectCandlePattern(cs.slice(0, -1)); // use closed candles only
+
+  // Draw S/R + Order Blocks every scan
+  drawSRLevels(cs);
+  drawOrderBlocks(cs);
+
+  // Run all chart pattern detectors
+  const candidates = [
+    detectDoubleBottom(lows, cs),
+    detectDoubleTop(highs, cs),
+    detectHeadShoulders(highs, cs),
+    detectInverseHS(lows, cs),
+    detectAscendingTriangle(highs, lows, cs),
+    detectDescendingTriangle(highs, lows, cs),
+    detectSymTriangle(highs, lows, cs),
+    detectBullFlag(highs, lows, cs),
+    detectBearFlag(highs, lows, cs),
+  ].filter(Boolean);
+
+  if (!candidates.length) {
+    // Still fire standalone candle pattern alert if strong
+    if (candle && candle.dir !== 'neutral') {
+      fireCandleAlert(candle, pair, cur.close);
+    }
+    return;
+  }
+
+  for (const raw of candidates) {
+    // HTF bias filter: only allow signals that align with trend
+    if (htfBias === 'bull' && raw.dir === 'short') continue;
+    if (htfBias === 'bear' && raw.dir === 'long')  continue;
+    // neutral bias: allow all
+
+    // Candle confirmation boosts confidence
+    let confirmed = false;
+    let candleName = null;
+    if (candle) {
+      if (raw.dir === 'long'  && candle.dir === 'bull') { confirmed = true; candleName = candle.name; }
+      if (raw.dir === 'short' && candle.dir === 'bear') { confirmed = true; candleName = candle.name; }
+    }
+
+    // Confidence penalty if no candle confirmation
+    const conf = confirmed ? Math.min(raw.conf + 5, 99) : raw.conf - 8;
+    if (conf < 60) continue;
+
+    // Build signal
+    const entry  = raw.entry || cur.close;
+    const height = Math.abs(entry - cur.close) || entry * 0.01;
+    const riskPx = raw.dir === 'long'
+      ? entry - (raw.l || entry - height)
+      : (raw.h  || entry + height) - entry;
+    const sl  = raw.dir === 'long'  ? entry - riskPx * 1.05 : entry + riskPx * 1.05;
+    const tp1 = raw.dir === 'long'  ? entry + riskPx * 1    : entry - riskPx * 1;
+    const tp2 = raw.dir === 'long'  ? entry + riskPx * RR_RATIO     : entry - riskPx * RR_RATIO;
+    const tp3 = raw.dir === 'long'  ? entry + riskPx * (RR_RATIO + 1) : entry - riskPx * (RR_RATIO + 1);
+
+    const key = `${pair.sym}_${raw.dir}_${raw.pattern.replace(/\s/g,'')}_${Math.floor(Date.now()/3600000)}`;
+
+    // Dedup: block if active signal of same type already exists for this pair
+    const alreadyActive = Object.values(signals).some(s =>
+      s.pairId === pair.id && s.dir === raw.dir &&
+      !['expired','sl_hit','tp3_hit'].includes(s.status)
+    );
+    if (alreadyActive || signals[key]) continue;
+
+    const sig = {
+      id: key, key,
+      pairId: pair.id, sym: pair.sym,
+      pattern: raw.pattern,
+      candlePattern: candleName,
+      dir: raw.dir,
+      entry, sl, tp1, tp2, tp3,
+      htfBias,
+      confidence: conf,
+      status: 'pending',
+      detectedAt: Date.now(),
+      latestPrice: cur.close,
+    };
+
+    signals[key] = sig;
+    saveSignals();
+
+    // Fire detection alert
+    const alertType = raw.dir === 'long' ? 'long' : 'short';
+    fireAlert(`${raw.dir === 'long' ? '▲ LONG' : '▼ SHORT'} SIGNAL — ${pair.sym} · ${raw.pattern}`, alertType);
+    playTone(raw.dir === 'long' ? [523, 659, 784] : [784, 659, 523]);
+    flashChart(raw.dir === 'long' ? 'long' : 'short');
+
+    // Update watchbar dot
+    const btn = document.querySelector(`.pair-btn[data-id="${pair.id}"]`);
+    if (btn) {
+      btn.classList.remove('has-long','has-short');
+      btn.classList.add(raw.dir === 'long' ? 'has-long' : 'has-short');
+    }
+
+    // Update chart: draw signal lines + entry arrow marker
+    if (pair.id === activePair.id) {
+      drawSignalLines(Object.values(signals).filter(s => s.pairId === pair.id && !['expired','sl_hit'].includes(s.status)));
+      setChartMarkers(Object.values(signals).filter(s => s.pairId === pair.id));
+    }
+
+    renderSignals();
+    console.log(`[APEX] Signal: ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | Conf:${conf}% | Entry:${entry.toFixed(pair.dec)}`);
+  }
+
+  // Standalone candle pattern alert (even without chart pattern)
+  if (candle && candle.dir !== 'neutral') {
+    fireCandleAlert(candle, pair, cur.close);
+  }
+}
+
+function fireCandleAlert(candle, pair, price) {
+  // Only fire standalone if no active signal already covers this pair/direction
+  const key = `candle_${pair.sym}_${candle.name.replace(/\s/g,'')}_${Math.floor(Date.now()/900000)}`; // 15m dedup
+  if (signals[key]) return;
+  signals[key] = { id: key, standalone: true, status: 'candle', detectedAt: Date.now() };
+
+  fireAlert(`🕯 ${candle.name} — ${pair.sym} @ $${price.toFixed(pair.dec)}`, 'candle');
+  playTone(candle.dir === 'bull' ? [440, 550] : [550, 440], 'triangle');
+}
+
+// ── BACKGROUND SCANNER (all pairs) ────────────
+let _bgScanIdx = 0;
+async function bgScan() {
+  const p = PAIRS[_bgScanIdx % PAIRS.length];
+  _bgScanIdx++;
+  try {
+    const cs = await getKlines(p.id, activeTF, 150);
+    await runPatternScan(cs, p);
+    // Also update candles for active pair
+    if (p.id === activePair.id) {
+      candles = cs;
+      updateIndicators(cs);
+    }
+  } catch(e) {}
+}
+
+// ── SCAN ON CLOSED CANDLE (in WS handler) ─────
+// This hook is called from the existing WS onmessage when k.x (candle closed)
+function onCandleClosed(cs, pair) {
+  runPatternScan(cs, pair);
+}
+
+// ═══════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════
 async function init() {
@@ -2018,7 +2488,16 @@ async function init() {
   setInterval(bgPriceUpdate, 15000);
   bgPriceUpdate();
 
-  // Re-render signal proximituy every 5s
+  // Background pattern scanner — rotates through all pairs every 2 minutes
+  setInterval(bgScan, 12000); // scan one pair every 12s → full rotation ~2min
+  setTimeout(bgScan, 3000);   // first scan after 3s
+
+  // Initial scan on active pair immediately after load
+  setTimeout(() => {
+    if (candles.length > 50) runPatternScan(candles, activePair);
+  }, 5000);
+
+  // Re-render signal proximity every 5s
   setInterval(renderSignals, 5000);
 }
 
