@@ -559,12 +559,45 @@ html, body {
 .sc-status.sl_hit   { background: rgba(255,61,87,0.1); color: var(--red); border: 1px solid rgba(255,61,87,0.3); }
 .sc-status.expired  { background: rgba(255,201,71,0.08); color: var(--gold); border: 1px solid rgba(255,201,71,0.2); }
 
-.candle-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  margin-top: 6px;
+.sig-card.active-trade {
+  box-shadow: 0 0 0 1px rgba(0,212,255,0.15), 0 4px 20px rgba(0,0,0,0.4);
 }
+.sig-card.active-trade.long  { box-shadow: 0 0 0 1px rgba(0,230,118,0.2), 0 4px 20px rgba(0,0,0,0.4); }
+.sig-card.active-trade.short { box-shadow: 0 0 0 1px rgba(255,61,87,0.2),  0 4px 20px rgba(0,0,0,0.4); }
+.sig-card.closed { opacity: 0.55; }
+
+/* Live P&L strip */
+.live-pnl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.live-pnl.pos { background: rgba(0,230,118,0.08); border: 1px solid rgba(0,230,118,0.2); }
+.live-pnl.neg { background: rgba(255,61,87,0.08);  border: 1px solid rgba(255,61,87,0.2); }
+.pnl-lbl { font-size: 8px; letter-spacing: 1px; opacity: 0.7; }
+.pnl-val { flex: 1; }
+.pnl-val.pos { color: var(--green); }
+.pnl-val.neg { color: var(--red); }
+.pnl-r { font-size: 13px; }
+.live-pnl.pos .pnl-r { color: var(--green); }
+.live-pnl.neg .pnl-r { color: var(--red); }
+
+/* Extra journal stat cards */
+.stat-card.best  .stat-val { color: var(--green); }
+.stat-card.worst .stat-val { color: var(--red); }
+
+/* Status badges — fill gaps */
+.sc-status.tp1hit  { background: rgba(0,230,118,0.1);  color: var(--green);  border: 1px solid rgba(0,230,118,0.3); }
+.sc-status.tp2hit  { background: rgba(105,240,174,0.1); color: #69f0ae;       border: 1px solid rgba(105,240,174,0.3); }
+.sc-status.tp3hit  { background: rgba(185,251,192,0.1); color: #b9fbc0;       border: 1px solid rgba(185,251,192,0.3); }
+.sc-status.expired { background: rgba(255,201,71,0.08); color: var(--gold);   border: 1px solid rgba(255,201,71,0.2); }
+.sc-status.slhit   { background: rgba(255,61,87,0.1);   color: var(--red);    border: 1px solid rgba(255,61,87,0.3); }
+
 .cbadge {
   font-size: 8px;
   padding: 2px 5px;
@@ -944,6 +977,14 @@ html, body {
           <div class="stat-card">
             <div class="stat-lbl">MAX DRAWDOWN</div>
             <div class="stat-val neg" id="jDrawdown">—</div>
+          </div>
+          <div class="stat-card best">
+            <div class="stat-lbl">BEST TRADE</div>
+            <div class="stat-val" id="jBest">—</div>
+          </div>
+          <div class="stat-card worst">
+            <div class="stat-lbl">WORST TRADE</div>
+            <div class="stat-val" id="jWorst">—</div>
           </div>
         </div>
         <div class="equity-wrap">
@@ -1447,71 +1488,167 @@ function setChartMarkers(sigs) {
 }
 
 // ═══════════════════════════════════════════════
-// WEBSOCKET — REAL-TIME PRICE STREAMING
+// WEBSOCKET — STABLE REAL-TIME STREAMING
 // ═══════════════════════════════════════════════
+let wsReconnectTimer = null;
+let wsReconnectDelay = 2000;
+let wsActivePairId   = null;
+let wsActiveTF       = null;
+let wsIntentionalClose = false;
+
 function connectWS(pair, tf) {
-  if (socket) { socket.close(); socket = null; }
-  setStatus('connecting', 'CONNECTING');
+  // Clear any pending reconnect
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
 
-  const stream = `${pair.id.toLowerCase()}@kline_${tf}`;
-  socket = new WebSocket(`wss://stream.binance.com:9443/ws/${stream}`);
+  // Mark intentional close so onclose doesn't trigger reconnect
+  wsIntentionalClose = true;
+  if (socket) {
+    try { socket.close(); } catch(e) {}
+    socket = null;
+  }
+  wsIntentionalClose = false;
 
-  socket.onopen = () => {
-    setStatus('live', 'LIVE · WS');
-  };
+  wsActivePairId = pair.id;
+  wsActiveTF     = tf;
+  wsReconnectDelay = 2000; // reset backoff on fresh connect
 
-  socket.onmessage = (evt) => {
-    const d = JSON.parse(evt.data);
-    const k = d.k;
-    const price = parseFloat(k.c);
-    const candleData = {
-      time:  Math.floor(k.t / 1000),
-      open:  parseFloat(k.o),
-      high:  parseFloat(k.h),
-      low:   parseFloat(k.l),
-      close: price,
+  _openWS(pair, tf);
+}
+
+function _openWS(pair, tf) {
+  // Fallback WS hosts
+  const WS_HOSTS = [
+    'wss://stream.binance.com:9443',
+    'wss://stream.binance.com:443',
+    'wss://stream1.binance.com:9443',
+  ];
+  let wsHostIdx = 0;
+
+  function tryHost() {
+    const url = `${WS_HOSTS[wsHostIdx % WS_HOSTS.length]}/ws/${pair.id.toLowerCase()}@kline_${tf}`;
+    setStatus('connecting', 'CONNECTING');
+
+    let ws;
+    try { ws = new WebSocket(url); }
+    catch(e) { scheduleReconnect(pair, tf); return; }
+
+    // Heartbeat — Binance closes idle connections after ~24h
+    // but also drops them on server-side every few hours.
+    // We send a ping every 3 minutes to keep it alive.
+    let heartbeat = null;
+
+    ws.onopen = () => {
+      socket = ws;
+      wsReconnectDelay = 2000; // reset backoff on successful connect
+      setStatus('live', 'LIVE');
+
+      // Start heartbeat ping
+      heartbeat = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ method: 'ping' })); } catch(e) {}
+        }
+      }, 180000); // every 3 min
     };
 
-    if (candleSeries) candleSeries.update(candleData);
-    updatePrice(price, pair);
+    ws.onmessage = (evt) => {
+      // Ignore if this WS is no longer the active one
+      if (ws !== socket) return;
 
-    // Update candles array (update last candle or append)
-    if (candles.length > 0) {
-      const last = candles[candles.length - 1];
-      if (last.time === candleData.time) {
-        candles[candles.length - 1] = { ...candleData, volume: last.volume };
-      } else if (candleData.time > last.time) {
-        candles.push({ ...candleData, volume: 0 });
-        // On closed candle — run indicators update
-        if (k.x) {
-          updateIndicators(candles);
-          if (showChannel) drawChannel(candles);
-          // Run full pattern scan on closed candle
-          onCandleClosed(candles, pair);
+      let d;
+      try { d = JSON.parse(evt.data); } catch(e) { return; }
+      if (!d.k) return; // pong or other message
+
+      const k     = d.k;
+      const price = parseFloat(k.c);
+      if (isNaN(price)) return;
+
+      const candleData = {
+        time:  Math.floor(k.t / 1000),
+        open:  parseFloat(k.o),
+        high:  parseFloat(k.h),
+        low:   parseFloat(k.l),
+        close: price,
+      };
+
+      // Update chart — only if this is the active pair
+      if (candleSeries && pair.id === activePair.id) {
+        try { candleSeries.update(candleData); } catch(e) {}
+      }
+
+      // Update price display
+      if (pair.id === activePair.id) updatePrice(price, pair);
+
+      // Update candles array
+      if (candles.length > 0 && pair.id === activePair.id) {
+        const last = candles[candles.length - 1];
+        if (last.time === candleData.time) {
+          candles[candles.length - 1] = { ...candleData, volume: last.volume };
+        } else if (candleData.time > last.time) {
+          candles.push({ ...candleData, volume: 0 });
+          if (k.x) {
+            updateIndicators(candles);
+            if (showChannel) drawChannel(candles);
+            onCandleClosed(candles, pair);
+          }
         }
       }
+
+      // Signal tracking — always runs regardless of which pair is displayed
+      updateSignalStatuses(price, pair.id);
+
+      // Only re-render signals panel if viewing this pair
+      if (pair.id === activePair.id) renderSignals();
+
+      // Update watchbar price
+      updateWatchbarItem(pair.id, price, null);
+    };
+
+    ws.onclose = (evt) => {
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+      // If intentionally closed (pair/TF switch) — do nothing
+      if (wsIntentionalClose) return;
+      // If a newer connection already exists — do nothing
+      if (socket && socket !== ws) return;
+      socket = null;
+
+      // Only reconnect if this pair/tf is still the active one
+      if (pair.id !== wsActivePairId || tf !== wsActiveTF) return;
+
+      // Show reconnecting but DON'T reload chart data — just reconnect WS
+      setStatus('connecting', 'RECONNECTING');
+      scheduleReconnect(pair, tf);
+    };
+
+    ws.onerror = () => {
+      // Try next host on next reconnect attempt
+      wsHostIdx++;
+    };
+  }
+
+  tryHost();
+}
+
+function scheduleReconnect(pair, tf) {
+  if (wsReconnectTimer) return; // already scheduled
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    // Only reconnect if this is still the active pair/tf
+    if (pair.id === wsActivePairId && tf === wsActiveTF) {
+      _openWS(pair, tf);
+      // Exponential backoff — cap at 30 seconds
+      wsReconnectDelay = Math.min(wsReconnectDelay * 1.5, 30000);
     }
-
-    // Real-time signal status + proximity update
-    updateSignalStatuses(price, pair.id);
-    renderSignals();
-  };
-
-  socket.onclose = () => {
-    setStatus('connecting', 'RECONNECTING');
-    setTimeout(() => connectWS(pair, tf), 3000);
-  };
-
-  socket.onerror = () => {
-    setStatus('error', 'WS ERROR');
-  };
+  }, wsReconnectDelay);
 }
 
 function setStatus(cls, label) {
-  const pill  = document.getElementById('wsStatus');
-  const lbl   = document.getElementById('wsLabel');
-  pill.className = 'status-pill ' + cls;
-  lbl.textContent = label;
+  const pill = document.getElementById('wsStatus');
+  const lbl  = document.getElementById('wsLabel');
+  // Debounce — don't flicker if status hasn't changed
+  if (pill.dataset.cls === cls && lbl.textContent === label) return;
+  pill.dataset.cls    = cls;
+  pill.className      = 'status-pill ' + cls;
+  lbl.textContent     = label;
 }
 
 function updatePrice(price, pair) {
@@ -1521,78 +1658,155 @@ function updatePrice(price, pair) {
 // ═══════════════════════════════════════════════
 // SIGNAL STATUS TRACKING
 // ═══════════════════════════════════════════════
-const ENTRY_TOL_PCT = 0.002;
+// ═══════════════════════════════════════════════
+// PHASE 3 — LIVE SIGNAL TRACKING & P&L ENGINE
+// ═══════════════════════════════════════════════
 
+const ENTRY_TOL_PCT = 0.003; // 0.3% — wider zone for realistic entries
+
+// ── LIVE P&L CALCULATION ──────────────────────
+function calcLivePnL(s, currentPrice) {
+  if (!s.entryPrice || s.status === 'pending') return null;
+  const ep = s.entryPrice;
+  const raw = s.dir === 'long'
+    ? (currentPrice - ep) / ep * 100
+    : (ep - currentPrice) / ep * 100;
+  // Convert to R-multiple
+  const riskPct = Math.abs(ep - s.sl) / ep * 100;
+  const rMultiple = riskPct > 0 ? raw / riskPct : 0;
+  return { pct: raw.toFixed(2), r: rMultiple.toFixed(2), positive: raw >= 0 };
+}
+
+// ── PROXIMITY CALCULATION (improved) ─────────
+function calcProximity(s, price) {
+  const entry = s.entry;
+  const distPct = Math.abs(price - entry) / entry * 100;
+
+  // For entered trades — show progress to next TP instead
+  if (['entered','tp1_hit','tp2_hit'].includes(s.status)) {
+    const nextTP = !s.aTp1 ? s.tp1 : !s.aTp2 ? s.tp2 : s.tp3;
+    if (!nextTP) return { type:'progress', pct:100, label:'AT TARGET', color:'#00e676' };
+    const totalMove = Math.abs(nextTP - s.entryPrice || s.entry);
+    const progress  = Math.abs(price - (s.entryPrice || s.entry));
+    const pct = Math.min(100, (progress / totalMove) * 100);
+    const label = `${pct.toFixed(0)}% to TP${!s.aTp1?'1':!s.aTp2?'2':'3'}`;
+    const color = pct >= 75 ? '#00e676' : pct >= 40 ? '#ffc947' : '#00d4ff';
+    return { type:'progress', pct, label, color };
+  }
+
+  // For pending — show distance to entry
+  const pct      = Math.max(0, Math.min(100, 100 - (distPct / 2) * 100));
+  const inZone   = distPct <= 0.3;
+  const close    = distPct <= 1.5;
+  const color    = inZone ? '#b388ff' : close ? '#ffc947' : '#3d5470';
+  const label    = inZone ? '⚡ IN ZONE' : distPct.toFixed(2) + '% away';
+  return { type:'entry', pct, label, color, inZone, distPct };
+}
+
+// ── SIGNAL STATUS UPDATE (called every price tick) ──
 function updateSignalStatuses(price, pairId) {
   let changed = false;
-  Object.values(signals).filter(s => s.pairId === pairId).forEach(s => {
-    if (['expired','sl_hit','tp3_hit'].includes(s.status)) return;
 
-    // Expiry check
-    if (s.status === 'pending' && ageMin(s.detectedAt) >= EXP_MINS) {
-      s.status = 'expired';
-      fireAlert('⏰ SIGNAL EXPIRED — ' + s.sym, 'sl');
-      playTone([440, 400], 'triangle');
-      changed = true;
-      logToJournal(s, 'expired');
-      return;
-    }
+  Object.values(signals)
+    .filter(s => s.pairId === pairId && !s.standalone)
+    .forEach(s => {
+      const terminal = ['expired','sl_hit','tp3_hit'];
+      if (terminal.includes(s.status)) return;
 
-    s.latestPrice = price;
-    const dir = s.dir;
+      // Always update latest price
+      s.latestPrice = price;
 
-    // SL check
-    if (dir === 'long'  && s.sl && price <= s.sl) { markHit(s, 'sl_hit'); changed = true; return; }
-    if (dir === 'short' && s.sl && price >= s.sl) { markHit(s, 'sl_hit'); changed = true; return; }
-
-    // TP3
-    if (!s.aTp3 && s.tp3) {
-      if ((dir==='long' && price >= s.tp3) || (dir==='short' && price <= s.tp3)) {
-        s.aTp3 = true; s.status = 'tp3_hit';
-        fireAlert('🎯 TP3 HIT — ' + s.sym, 'tp');
-        playTone([880,1100,1320,1540]);
-        changed = true; logToJournal(s, 'tp3'); return;
-      }
-    }
-    // TP2
-    if (!s.aTp2 && s.tp2) {
-      if ((dir==='long' && price >= s.tp2) || (dir==='short' && price <= s.tp2)) {
-        s.aTp2 = true; s.status = 'tp2_hit';
-        fireAlert('✅ TP2 HIT — ' + s.sym, 'tp');
-        playTone([880,1100,1320]);
+      // ── EXPIRY CHECK (pending only) ────────
+      if (s.status === 'pending' && ageMin(s.detectedAt) >= EXP_MINS) {
+        s.status = 'expired';
+        fireAlert(`⏰ EXPIRED — ${s.sym} ${s.pattern}`, 'sl');
+        playTone([440, 400], 'triangle');
+        logToJournal(s, 'expired');
         changed = true;
+        return;
       }
-    }
-    // TP1
-    if (!s.aTp1 && s.tp1) {
-      if ((dir==='long' && price >= s.tp1) || (dir==='short' && price <= s.tp1)) {
-        s.aTp1 = true;
-        if (s.status === 'entered') s.status = 'tp1_hit';
-        fireAlert('🟢 TP1 HIT — ' + s.sym + ' · Move SL to BE', 'tp');
-        playTone([880,1100]);
-        changed = true;
-      }
-    }
-    // Entry zone
-    if (s.status === 'pending') {
-      const dist = Math.abs(price - s.entry) / s.entry;
-      if (dist <= ENTRY_TOL_PCT && !s.aEntry) {
-        s.aEntry = true; s.status = 'entered';
-        fireAlert('⚡ ENTRY ZONE HIT — ' + s.sym, 'entry');
-        playTone([660,880,1100]);
-        flashChart('entry');
-        changed = true;
-      }
-    }
 
-    if (changed) saveSignals();
-  });
+      const dir = s.dir;
+
+      // ── SL CHECK (active trades only) ─────
+      if (s.status !== 'pending') {
+        if (dir === 'long'  && price <= s.sl) { markHit(s, 'sl_hit'); changed = true; return; }
+        if (dir === 'short' && price >= s.sl) { markHit(s, 'sl_hit'); changed = true; return; }
+      }
+
+      // ── TP SEQUENCE ───────────────────────
+      if (s.status !== 'pending') {
+        // TP3
+        if (!s.aTp3 && s.tp3) {
+          if ((dir==='long' && price >= s.tp3) || (dir==='short' && price <= s.tp3)) {
+            s.aTp3 = true; s.aTp2 = true; s.aTp1 = true;
+            s.status = 'tp3_hit';
+            s.closedAt = Date.now(); s.closePrice = price;
+            fireAlert(`🎯 TP3 HIT — ${s.sym} · Full target reached!`, 'tp');
+            playTone([880,1100,1320,1540]);
+            logToJournal(s, 'tp3');
+            changed = true; return;
+          }
+        }
+        // TP2
+        if (!s.aTp2 && s.tp2) {
+          if ((dir==='long' && price >= s.tp2) || (dir==='short' && price <= s.tp2)) {
+            s.aTp2 = true; s.aTp1 = true;
+            s.status = 'tp2_hit';
+            fireAlert(`✅ TP2 HIT — ${s.sym} · Move SL to TP1`, 'tp');
+            playTone([880,1100,1320]);
+            changed = true;
+          }
+        }
+        // TP1
+        if (!s.aTp1 && s.tp1) {
+          if ((dir==='long' && price >= s.tp1) || (dir==='short' && price <= s.tp1)) {
+            s.aTp1 = true;
+            s.status = 'tp1_hit';
+            fireAlert(`🟢 TP1 HIT — ${s.sym} · Move SL to breakeven`, 'tp');
+            playTone([880,1100]);
+            changed = true;
+          }
+        }
+      }
+
+      // ── ENTRY ZONE CHECK ──────────────────
+      if (s.status === 'pending') {
+        const dist = Math.abs(price - s.entry) / s.entry;
+
+        // Near-zone warning (within 1%)
+        if (dist <= 0.01 && !s.aNearEntry) {
+          s.aNearEntry = true;
+          fireAlert(`⚠️ APPROACHING ENTRY — ${s.sym} · ${(dist*100).toFixed(2)}% away`, 'candle');
+          playTone([440, 520], 'triangle');
+          changed = true;
+        }
+
+        // Entry hit
+        if (dist <= ENTRY_TOL_PCT && !s.aEntry) {
+          s.aEntry    = true;
+          s.status    = 'entered';
+          s.entryPrice = price; // lock in actual entry price
+          s.enteredAt  = Date.now();
+          fireAlert(`⚡ ENTRY TRIGGERED — ${s.sym} ${s.dir.toUpperCase()} @ $${price.toFixed(activePair.dec)}`, 'entry');
+          playTone([660,880,1100]);
+          flashChart('entry');
+          changed = true;
+        }
+      }
+
+      if (changed) saveSignals();
+    });
 }
 
 function markHit(s, status) {
-  s.status = status;
+  s.status    = status;
+  s.closedAt  = Date.now();
+  s.closePrice = s.latestPrice;
   if (status === 'sl_hit') {
-    fireAlert('🛑 SL HIT — ' + s.sym, 'sl');
+    const pnl = calcLivePnL(s, s.latestPrice);
+    const pnlStr = pnl ? ` · ${pnl.r}R` : '';
+    fireAlert(`🛑 STOPPED OUT — ${s.sym}${pnlStr}`, 'sl');
     playTone([440,330,220], 'sawtooth');
     flashChart('short');
     logToJournal(s, 'sl');
@@ -1601,6 +1815,14 @@ function markHit(s, status) {
 }
 
 function saveSignals() {
+  // Prune signals older than 24h to keep storage clean
+  const cutoff = Date.now() - 86400000;
+  Object.keys(signals).forEach(k => {
+    const s = signals[k];
+    if (s.detectedAt < cutoff && ['expired','sl_hit','tp3_hit'].includes(s.status)) {
+      delete signals[k];
+    }
+  });
   try { localStorage.setItem('apex_signals_v1', JSON.stringify(signals)); } catch(e){}
 }
 
@@ -1716,21 +1938,16 @@ async function loadPair(pair, tf) {
 // ═══════════════════════════════════════════════
 // RENDER SIGNALS PANEL
 // ═══════════════════════════════════════════════
-function proximity(entry, price) {
-  const dist = Math.abs(price - entry) / entry * 100;
-  return {
-    dist:   dist.toFixed(2),
-    pct:    Math.max(0, Math.min(100, 100 - (dist / 3) * 100)),
-    inZone: dist <= 0.2,
-    close:  dist <= 1.0,
-  };
-}
-
 function renderSignals() {
   const wrap = document.getElementById('signalsWrap');
   const pairSigs = Object.values(signals)
-    .filter(s => s.pairId === activePair.id)
-    .sort((a,b) => b.detectedAt - a.detectedAt);
+    .filter(s => s.pairId === activePair.id && !s.standalone)
+    .sort((a,b) => {
+      // Active trades first, then pending, then closed
+      const rank = s => ['entered','tp1_hit','tp2_hit'].includes(s.status) ? 0
+                      : s.status === 'pending' ? 1 : 2;
+      return rank(a) - rank(b) || b.detectedAt - a.detectedAt;
+    });
 
   if (!pairSigs.length) {
     wrap.innerHTML = `<div class="no-signals">
@@ -1741,44 +1958,85 @@ function renderSignals() {
     return;
   }
 
-  wrap.innerHTML = pairSigs.map(s => {
-    const price = s.latestPrice || s.entry;
-    const prox  = proximity(s.entry, price);
-    const proxColor = prox.inZone ? '#b388ff' : prox.close ? '#ffc947' : '#3d5470';
-    const tp1Done  = ['tp1_hit','tp2_hit','tp3_hit'].includes(s.status);
-    const tp2Done  = ['tp2_hit','tp3_hit'].includes(s.status);
-    const age      = ageMin(s.detectedAt);
+  wrap.innerHTML = pairSigs.slice(0, 6).map(s => {
+    const price   = s.latestPrice || s.entry;
+    const prox    = calcProximity(s, price);
+    const pnl     = calcLivePnL(s, price);
+    const tp1Done = ['tp1_hit','tp2_hit','tp3_hit'].includes(s.status);
+    const tp2Done = ['tp2_hit','tp3_hit'].includes(s.status);
+    const tp3Done = s.status === 'tp3_hit';
+    const age     = ageMin(s.detectedAt);
+    const isActive = ['entered','tp1_hit','tp2_hit'].includes(s.status);
+    const isClosed = ['sl_hit','tp3_hit','expired'].includes(s.status);
 
-    return `<div class="sig-card ${s.dir}">
+    // Live P&L display
+    const pnlHTML = pnl ? `
+      <div class="live-pnl ${pnl.positive ? 'pos' : 'neg'}">
+        <span class="pnl-lbl">LIVE P&L</span>
+        <span class="pnl-val">${pnl.positive?'+':''}${pnl.pct}%</span>
+        <span class="pnl-r">${pnl.positive?'+':''}${pnl.r}R</span>
+      </div>` : '';
+
+    // Time display
+    const timeLabel = isActive && s.enteredAt
+      ? `IN TRADE · ${ageMin(s.enteredAt)}m`
+      : `${age}m ago`;
+
+    return `<div class="sig-card ${s.dir} ${isClosed ? 'closed' : ''} ${isActive ? 'active-trade' : ''}">
       <div class="sc-head">
         <div class="sc-type ${s.dir}">${s.dir === 'long' ? '▲ LONG' : '▼ SHORT'} · ${s.sym}</div>
-        <div class="sc-conf ${s.confidence >= 80 ? 'high' : 'med'}">${s.confidence}%</div>
+        <div style="display:flex;gap:4px;align-items:center">
+          <div class="sc-conf ${s.confidence >= 80 ? 'high' : 'med'}">${s.confidence}%</div>
+          <div style="font-size:8px;color:var(--muted);letter-spacing:0.5px">${timeLabel}</div>
+        </div>
       </div>
       <div class="sc-pattern">📐 ${s.pattern}${s.candlePattern ? ' · 🕯 ' + s.candlePattern : ''}</div>
+
+      ${pnlHTML}
+
       <div class="prox-wrap">
         <div class="prox-lbl">
-          <span>ENTRY ZONE</span>
-          <span style="color:${proxColor}">${prox.inZone ? '⚡ IN ZONE' : prox.dist + '% away'}</span>
+          <span>${prox.type === 'progress' ? (tp1Done && !tp2Done ? 'TO TP2' : tp2Done ? 'TO TP3' : 'TO TP1') : 'ENTRY ZONE'}</span>
+          <span style="color:${prox.color}">${prox.label}</span>
         </div>
         <div class="prox-bar">
-          <div class="prox-fill" style="width:${prox.pct}%;background:${proxColor}"></div>
+          <div class="prox-fill" style="width:${prox.pct}%;background:${prox.color}"></div>
         </div>
       </div>
+
       <div class="sc-levels">
-        <div class="sc-lvl entry"><div class="lbl">ENTRY</div><div class="val">$${fmt(s.entry, activePair.dec)}</div></div>
-        <div class="sc-lvl sl"><div class="lbl">STOP LOSS</div><div class="val">$${fmt(s.sl, activePair.dec)}</div></div>
-        <div class="sc-lvl tp1"><div class="lbl">TP1 ${tp1Done?'✓':''}</div><div class="val" style="${tp1Done?'opacity:0.4;text-decoration:line-through':''}">${fmt(s.tp1, activePair.dec)}</div></div>
-        <div class="sc-lvl tp2"><div class="lbl">TP2 ${tp2Done?'✓':''}</div><div class="val" style="${tp2Done?'opacity:0.4;text-decoration:line-through':''}">${fmt(s.tp2, activePair.dec)}</div></div>
-        ${s.tp3 ? `<div class="sc-lvl tp3"><div class="lbl">TP3</div><div class="val">${fmt(s.tp3, activePair.dec)}</div></div>` : ''}
+        <div class="sc-lvl entry">
+          <div class="lbl">ENTRY ${s.entryPrice ? '✓' : ''}</div>
+          <div class="val">${fmt(s.entryPrice || s.entry, activePair.dec)}</div>
+        </div>
+        <div class="sc-lvl sl">
+          <div class="lbl">STOP LOSS</div>
+          <div class="val">${fmt(s.sl, activePair.dec)}</div>
+        </div>
+        <div class="sc-lvl tp1">
+          <div class="lbl">TP1 ${tp1Done?'✓':''}</div>
+          <div class="val" style="${tp1Done?'opacity:0.4;text-decoration:line-through':''}">${fmt(s.tp1, activePair.dec)}</div>
+        </div>
+        <div class="sc-lvl tp2">
+          <div class="lbl">TP2 ${tp2Done?'✓':''}</div>
+          <div class="val" style="${tp2Done?'opacity:0.4;text-decoration:line-through':''}">${fmt(s.tp2, activePair.dec)}</div>
+        </div>
+        ${s.tp3 ? `<div class="sc-lvl tp3">
+          <div class="lbl">TP3 ${tp3Done?'✓':''}</div>
+          <div class="val" style="${tp3Done?'opacity:0.4;text-decoration:line-through':''}">${fmt(s.tp3, activePair.dec)}</div>
+        </div>` : ''}
       </div>
+
       <div class="sc-rr">
-        <span>R:R 1:${RR_RATIO} · ${age}m ago</span>
-        <span>HTF: ${s.htfBias?.toUpperCase() || '—'}</span>
+        <span>R:R 1:${RR_RATIO} · HTF: ${s.htfBias?.toUpperCase() || '—'}</span>
+        <span style="color:var(--muted)">${s.entryPrice ? 'Entry @ ' + fmt(s.entryPrice, activePair.dec) : 'Awaiting entry'}</span>
       </div>
-      <div class="sc-status ${s.status.replace('_','')}">
+
+      <div class="sc-status ${s.status.replace(/_/g,'')}">
         ${statusLabel(s.status)}
       </div>
-      ${s.candlePattern ? `<div class="candle-badges"><span class="cbadge ${s.dir === 'long' ? 'bull':'bear'}">${s.candlePattern}</span></div>` : ''}
+
+      ${s.candlePattern ? `<div class="candle-badges"><span class="cbadge ${s.dir==='long'?'bull':'bear'}">${s.candlePattern}</span></div>` : ''}
     </div>`;
   }).join('');
 }
@@ -1797,35 +2055,74 @@ function statusLabel(s) {
 }
 
 // ═══════════════════════════════════════════════
-// JOURNAL
+// PHASE 3 — JOURNAL ENGINE
 // ═══════════════════════════════════════════════
 function logToJournal(s, outcome) {
-  const pnlPct = outcome === 'tp3' ? RR_RATIO * 1.5 :
-                 outcome === 'tp2' ? RR_RATIO :
-                 outcome === 'tp1' ? RR_RATIO * 0.5 :
-                 outcome === 'sl'  ? -1 : 0;
+  // Avoid duplicate journal entries
+  if (journal.find(j => j.id === s.id)) return;
+
+  const actualEntry = s.entryPrice || s.entry;
+  const actualExit  = s.closePrice || s.latestPrice || s.entry;
+
+  // Calculate actual R-multiple from real entry/exit prices
+  const riskPx  = Math.abs(actualEntry - s.sl);
+  let pnlPx = 0;
+  if (outcome === 'tp3')     pnlPx = Math.abs(s.tp3 - actualEntry);
+  else if (outcome === 'tp2') pnlPx = Math.abs(s.tp2 - actualEntry);
+  else if (outcome === 'tp1') pnlPx = Math.abs(s.tp1 - actualEntry);
+  else if (outcome === 'sl')  pnlPx = -riskPx;
+  else pnlPx = 0; // expired
+
+  const dir    = s.dir === 'long' ? 1 : -1;
+  const rMult  = riskPx > 0 ? (pnlPx * dir) / riskPx : 0;
+  const pnlPct = riskPx > 0 ? (pnlPx * dir / actualEntry) * 100 : 0;
+
   journal.push({
-    id: s.id, sym: s.sym, dir: s.dir, pattern: s.pattern,
-    entry: s.entry, outcome, pnlPct,
-    time: new Date().toISOString().slice(11,16),
-    date: new Date().toISOString().slice(0,10),
+    id:       s.id,
+    sym:      s.sym,
+    dir:      s.dir,
+    pattern:  s.pattern,
+    candle:   s.candlePattern || '—',
+    htfBias:  s.htfBias || '—',
+    entry:    actualEntry,
+    exit:     actualExit,
+    sl:       s.sl,
+    tp1:      s.tp1, tp2: s.tp2, tp3: s.tp3,
+    outcome,
+    pnlPct:   +pnlPct.toFixed(3),
+    rMult:    +rMult.toFixed(2),
+    confidence: s.confidence,
+    openedAt: s.enteredAt || s.detectedAt,
+    closedAt: s.closedAt  || Date.now(),
+    date:     new Date().toISOString().slice(0,10),
+    time:     new Date().toISOString().slice(11,16),
   });
+
   localStorage.setItem('apex_journal_v1', JSON.stringify(journal));
   renderJournal();
 }
 
 function renderJournal() {
-  if (!journal.length) return;
+  const closed = journal.filter(j => j.outcome !== 'expired');
+  if (!closed.length) {
+    document.getElementById('jWinRate').textContent  = '—';
+    document.getElementById('jAvgRR').textContent    = '—';
+    document.getElementById('jTotal').textContent    = '0';
+    document.getElementById('jDrawdown').textContent = '—';
+    return;
+  }
 
-  const wins   = journal.filter(j => j.pnlPct > 0).length;
-  const winRate = (wins / journal.length * 100).toFixed(0);
-  const avgRR   = (journal.reduce((s,j) => s + j.pnlPct, 0) / journal.length).toFixed(2);
+  const wins    = closed.filter(j => j.rMult > 0).length;
+  const winRate = (wins / closed.length * 100).toFixed(0);
+  const avgRR   = (closed.reduce((s,j) => s + j.rMult, 0) / closed.length).toFixed(2);
+  const bestTrade  = Math.max(...closed.map(j => j.rMult));
+  const worstTrade = Math.min(...closed.map(j => j.rMult));
 
-  // Max drawdown
-  let peak = 0, equity = 100, maxDD = 0;
+  // Equity curve — starts at 100
+  let equity = 100, peak = 100, maxDD = 0;
   const equityPoints = [100];
-  journal.forEach(j => {
-    equity *= (1 + j.pnlPct/100);
+  closed.forEach(j => {
+    equity = equity * (1 + j.pnlPct / 100);
     equityPoints.push(+equity.toFixed(2));
     if (equity > peak) peak = equity;
     const dd = (peak - equity) / peak * 100;
@@ -1833,45 +2130,76 @@ function renderJournal() {
   });
 
   document.getElementById('jWinRate').textContent  = winRate + '%';
-  document.getElementById('jAvgRR').textContent     = avgRR + 'R';
-  document.getElementById('jTotal').textContent     = journal.length;
-  document.getElementById('jDrawdown').textContent  = maxDD.toFixed(1) + '%';
+  document.getElementById('jAvgRR').textContent    = avgRR + 'R';
+  document.getElementById('jTotal').textContent    = closed.length;
+  document.getElementById('jDrawdown').textContent = maxDD.toFixed(1) + '%';
 
-  // Equity curve mini chart
+  // Add extra stats if elements exist
+  const jBest = document.getElementById('jBest');
+  const jWorst = document.getElementById('jWorst');
+  if (jBest) jBest.textContent = '+' + bestTrade.toFixed(1) + 'R';
+  if (jWorst) jWorst.textContent = worstTrade.toFixed(1) + 'R';
+
+  // Draw equity curve
   const canvas = document.getElementById('equityChart');
+  if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  canvas.width  = canvas.offsetWidth;
-  canvas.height = canvas.offsetHeight;
+  canvas.width  = canvas.offsetWidth  || 260;
+  canvas.height = canvas.offsetHeight || 80;
   const W = canvas.width, H = canvas.height;
-  const min = Math.min(...equityPoints), max = Math.max(...equityPoints);
-  const range = max - min || 1;
-  const toX = i => (i / (equityPoints.length-1)) * W;
-  const toY = v => H - ((v - min) / range) * H * 0.8 - H*0.1;
+  const minV = Math.min(...equityPoints);
+  const maxV = Math.max(...equityPoints);
+  const range = maxV - minV || 1;
+  const toX = i => (i / (equityPoints.length - 1)) * W;
+  const toY = v => H - ((v - minV) / range) * H * 0.8 - H * 0.1;
 
-  ctx.clearRect(0,0,W,H);
-  const grad = ctx.createLinearGradient(0,0,0,H);
-  grad.addColorStop(0, 'rgba(0,230,118,0.3)');
-  grad.addColorStop(1, 'rgba(0,230,118,0)');
+  ctx.clearRect(0, 0, W, H);
+
+  // Baseline
+  ctx.beginPath();
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3,4]);
+  const baseY = toY(100);
+  ctx.moveTo(0, baseY); ctx.lineTo(W, baseY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Fill gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  const finalEquity = equityPoints[equityPoints.length - 1];
+  const isProfit = finalEquity >= 100;
+  grad.addColorStop(0, isProfit ? 'rgba(0,230,118,0.25)' : 'rgba(255,61,87,0.25)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
 
   ctx.beginPath();
-  equityPoints.forEach((v,i) => i===0 ? ctx.moveTo(toX(i),toY(v)) : ctx.lineTo(toX(i),toY(v)));
-  ctx.strokeStyle = '#00e676';
-  ctx.lineWidth = 1.5;
+  equityPoints.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+  ctx.strokeStyle = isProfit ? '#00e676' : '#ff3d57';
+  ctx.lineWidth   = 1.5;
   ctx.stroke();
-  ctx.lineTo(W, H); ctx.lineTo(0, H);
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
   ctx.fillStyle = grad;
   ctx.fill();
 
+  // Current equity label
+  ctx.font = 'bold 9px JetBrains Mono, monospace';
+  ctx.fillStyle = isProfit ? '#00e676' : '#ff3d57';
+  ctx.fillText(finalEquity.toFixed(1), W - 34, 12);
+
   // Trade log
   const logEl = document.getElementById('journalLog');
-  logEl.innerHTML = journal.slice().reverse().slice(0,15).map(j => `
-    <div class="jlog-e ${j.pnlPct > 0 ? 'win' : 'loss'}">
+  logEl.innerHTML = journal.slice().reverse().slice(0, 20).map(j => {
+    const won  = j.rMult > 0;
+    const icon = j.outcome === 'tp3' ? '🎯' : j.outcome === 'tp2' ? '✅' :
+                 j.outcome === 'tp1' ? '🟢' : j.outcome === 'sl' ? '🛑' : '⏰';
+    return `<div class="jlog-e ${won ? 'win' : 'loss'}">
       <span class="jlog-sym">${j.sym}</span>
       <span class="jlog-type ${j.dir}">${j.dir.toUpperCase()}</span>
-      <span style="color:var(--muted2);font-size:8px;margin-left:2px">${j.pattern}</span>
-      <span style="color:var(--muted2);font-size:8px;margin-left:auto;margin-right:6px">${j.time}</span>
-      <span class="jlog-pnl ${j.pnlPct > 0 ? 'pos':'neg'}">${j.pnlPct > 0 ? '+':''} ${j.pnlPct.toFixed(1)}R</span>
-    </div>`).join('');
+      <span style="color:var(--muted2);font-size:8px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${j.pattern}</span>
+      <span style="font-size:9px;margin-right:4px">${icon}</span>
+      <span class="jlog-pnl ${won?'pos':'neg'}">${j.rMult >= 0?'+':''}${j.rMult.toFixed(1)}R</span>
+    </div>`;
+  }).join('');
 }
 
 // ═══════════════════════════════════════════════
