@@ -1119,7 +1119,17 @@ async function apiFetch(path) {
   throw new Error('All Binance hosts failed');
 }
 
-async function getKlines(sym, tf, limit = 200) {
+// Candle limits per timeframe — don't load unnecessary history
+function candleLimit(tf) {
+  return { '15m':150, '1h':150, '4h':120, '1d':90 }[tf] || 150;
+}
+
+// Visible bars per timeframe — how many candles to show on screen
+function visibleBars(tf) {
+  return { '15m':80, '1h':80, '4h':60, '1d':60 }[tf] || 80;
+}
+
+async function getKlines(sym, tf, limit = 150) {
   const d = await apiFetch(`/api/v3/klines?symbol=${sym}&interval=${tf}&limit=${limit}`);
   if (!Array.isArray(d) || !d.length) throw new Error(`No candles for ${sym}`);
   return d.map(c => ({
@@ -1447,14 +1457,19 @@ function addPriceLine(price, color, title, width = 1, style = 0) {
 
 function drawSignalLines(sigs) {
   clearPriceLines();
-  const active = sigs.filter(s => !['expired','sl_hit'].includes(s.status));
-  active.slice(0,1).forEach(s => {
+  // Only draw lines for ACTIVE signals — never for expired/closed
+  const active = sigs.filter(s =>
+    !['expired','sl_hit','tp3_hit'].includes(s.status) && !s.standalone
+  );
+  active.slice(0, 1).forEach(s => {
     addPriceLine(s.entry, '#b388ff', '◆ ENTRY', 2, 0);
     if (s.tp1) addPriceLine(s.tp1, '#00e676', 'TP1', 1, 0);
     if (s.tp2) addPriceLine(s.tp2, '#69f0ae', 'TP2', 1, 2);
     if (s.tp3) addPriceLine(s.tp3, '#b9fbc0', 'TP3', 1, 2);
     if (s.sl)  addPriceLine(s.sl,  '#ff3d57', 'SL',  1, 0);
   });
+  // If no active signals — ensure all lines are cleared
+  if (!active.length) clearPriceLines();
 }
 
 // ═══════════════════════════════════════════════
@@ -1723,6 +1738,14 @@ function updateSignalStatuses(price, pairId) {
         playTone([440, 400], 'triangle');
         logToJournal(s, 'expired');
         changed = true;
+        // Immediately clear chart lines for this pair
+        if (s.pairId === activePair.id) {
+          const remaining = Object.values(signals).filter(x =>
+            x.pairId === s.pairId && !['expired','sl_hit','tp3_hit'].includes(x.status) && !x.standalone
+          );
+          drawSignalLines(remaining);
+          setChartMarkers(remaining);
+        }
         return;
       }
 
@@ -1811,6 +1834,14 @@ function markHit(s, status) {
     flashChart('short');
     logToJournal(s, 'sl');
   }
+  // Clear chart lines immediately when trade closes
+  if (s.pairId === activePair.id) {
+    const remaining = Object.values(signals).filter(x =>
+      x.pairId === s.pairId && !['expired','sl_hit','tp3_hit'].includes(x.status) && !x.standalone
+    );
+    drawSignalLines(remaining);
+    setChartMarkers(remaining);
+  }
   saveSignals();
 }
 
@@ -1878,7 +1909,7 @@ async function loadPair(pair, tf) {
   try {
     // Fetch candles + ticker in parallel
     const [cs, ticker, bias] = await Promise.all([
-      getKlines(pair.id, tf, 300),
+      getKlines(pair.id, tf, candleLimit(tf)),
       getTicker(pair.id),
       getHTFBias(pair.id),
     ]);
@@ -1911,8 +1942,13 @@ async function loadPair(pair, tf) {
     drawSignalLines(pairSigs);
     setChartMarkers(pairSigs);
 
-    // Fit chart
-    chart.timeScale().fitContent();
+    // Show appropriate number of candles per timeframe — never auto-fit full history
+    const totalBars = cs.length;
+    const vBars = visibleBars(tf);
+    chart.timeScale().setVisibleLogicalRange({
+      from: totalBars - vBars,
+      to:   totalBars + 3,
+    });
 
     // Connect WS
     connectWS(pair, tf);
@@ -2230,6 +2266,10 @@ async function switchPair(p) {
   activePair = p;
   document.querySelectorAll('.pair-btn').forEach(b => b.classList.toggle('active', b.dataset.id === p.id));
   candles = [];
+  clearPriceLines();
+  // Clear SR and OB lines from previous pair
+  if (window._srLines) { window._srLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} }); window._srLines = []; }
+  if (window._obSeries) { window._obSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} }); window._obSeries = []; }
   await loadPair(p, activeTF);
 }
 
@@ -2761,7 +2801,7 @@ async function bgScan() {
   const p = PAIRS[_bgScanIdx % PAIRS.length];
   _bgScanIdx++;
   try {
-    const cs = await getKlines(p.id, activeTF, 150);
+    const cs = await getKlines(p.id, activeTF, candleLimit(activeTF));
     await runPatternScan(cs, p);
     // Also update candles for active pair
     if (p.id === activePair.id) {
