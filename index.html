@@ -3535,41 +3535,35 @@ async function getMTFConfirmation(pairId, dir) {
   }
 }
 
-// ── 7. TIGHTER PATTERN TOLERANCES ────────────
-// Override pattern detectors with tighter rules
 function detectDoubleTopStrict(highs, cs) {
   if (highs.length < 2) return null;
   const h1 = highs[highs.length - 2];
   const h2 = highs[highs.length - 1];
-  if (Math.abs(h1.p - h2.p) / h1.p > 0.0015) return null; // tightened to 0.15%
-  if (h2.i - h1.i < 8) return null; // min 8 candles apart
-  // Second top must be on lower volume
-  if (cs[h2.i]?.volume > cs[h1.i]?.volume * 0.9) return null; // h2 vol must be lower
+  if (Math.abs(h1.p - h2.p) / h1.p > 0.008) return null; // 0.8% — realistic for crypto
+  if (h2.i - h1.i < 5) return null; // min 5 candles apart
   const neckSlice = cs.slice(h1.i, h2.i);
   const neck = Math.min(...neckSlice.map(c => c.low));
-  // Neckline must be meaningful — at least 1% below tops
-  if ((h2.p - neck) / h2.p < 0.01) return null;
-  return { pattern: 'Double Top', dir: 'short', entry: neck, h: h2.p, neck, conf: 85 };
+  if ((h2.p - neck) / h2.p < 0.005) return null; // neckline at least 0.5% below
+  return { pattern: 'Double Top', dir: 'short', entry: neck, h: h2.p, neck, conf: 78 };
 }
 
 function detectDoubleBottomStrict(lows, cs) {
   if (lows.length < 2) return null;
   const l1 = lows[lows.length - 2];
   const l2 = lows[lows.length - 1];
-  if (Math.abs(l1.p - l2.p) / l1.p > 0.0015) return null; // tightened
-  if (l2.i - l1.i < 8) return null;
-  if (cs[l2.i]?.volume > cs[l1.i]?.volume * 0.9) return null;
+  if (Math.abs(l1.p - l2.p) / l1.p > 0.008) return null;
+  if (l2.i - l1.i < 5) return null;
   const neckSlice = cs.slice(l1.i, l2.i);
   const neck = Math.max(...neckSlice.map(c => c.high));
-  if ((neck - l2.p) / l2.p < 0.01) return null;
-  return { pattern: 'Double Bottom', dir: 'long', entry: neck, l: l2.p, neck, conf: 85 };
+  if ((neck - l2.p) / l2.p < 0.005) return null;
+  return { pattern: 'Double Bottom', dir: 'long', entry: neck, l: l2.p, neck, conf: 78 };
 }
 
 // ── MASTER SCAN FUNCTION (85%+ version) ───────
 async function runPatternScan(cs, pair) {
   if (cs.length < 50) return;
 
-  const { highs, lows } = findSwings(cs, 6); // tighter swing lookback
+  const { highs, lows } = findSwings(cs, 5);
   const htfBias = await getHTFBias(pair.id);
   const cur     = cs[cs.length - 1];
   const closed  = cs.slice(0, -1);
@@ -3581,7 +3575,7 @@ async function runPatternScan(cs, pair) {
     drawOrderBlocks(cs);
   }
 
-  // Run pattern detectors — use strict versions for DT/DB
+  // Run pattern detectors
   const candidates = [
     detectDoubleBottomStrict(lows, cs),
     detectDoubleTopStrict(highs, cs),
@@ -3599,59 +3593,81 @@ async function runPatternScan(cs, pair) {
     return;
   }
 
-  // Fetch MTF once for all candidates
-  const mtf = await getMTFConfirmation(pair.id, candidates[0]?.dir);
-
   for (const raw of candidates) {
     // ── GATE 1: HTF bias (hard filter) ────────
     if (htfBias === 'bull' && raw.dir === 'short') continue;
     if (htfBias === 'bear' && raw.dir === 'long')  continue;
 
-    // ── GATE 2: EMA stack (hard filter) ───────
+    // ── GATE 2: EMA stack ─────────────────────
     const emaCheck = checkEMAStack(cs, raw.dir);
-    if (emaCheck.score <= -20) continue; // perfect counter-stack = reject entirely
+    if (emaCheck.score <= -20) continue; // only reject on perfect counter-stack
 
-    // ── GATE 3: Candle confirmation REQUIRED ──
-    let candleName = null;
-    let candleScore = -12; // penalty if missing
+    // ── GATE 3: Candle confirmation ───────────
+    let candleName  = null;
+    let candleScore = -6;
     if (candle) {
       if (raw.dir === 'long'  && candle.dir === 'bull') { candleName = candle.name; candleScore = 10; }
       if (raw.dir === 'short' && candle.dir === 'bear') { candleName = candle.name; candleScore = 10; }
-      if (candle.dir === 'neutral') candleScore = -4;
+      if (candle.dir === 'neutral') candleScore = -2;
     }
-    // Without candle confirmation, cap at 72 max
     const candleConfirmed = candleScore > 0;
 
     // ── SCORING ENGINE ─────────────────────────
-    let conf = raw.conf; // base confidence from pattern
+    // Each filter is evaluated independently and tracked for agreement check
+    const macdScore  = checkMACDAlignment(cs, raw.dir);
+    const srScore    = checkSRProximity(cs, raw.entry, raw.dir);
+    const volScore   = calcVolumeScore(cs, raw.dir);
+    const mtfCheck   = await getMTFConfirmation(pair.id, raw.dir);
+    const rsiCheck   = detectRSIDivergence(cs, raw.dir);
 
-    // Add/subtract from all filters
-    conf += candleScore;                              // candle: +10 / -12
-    conf += emaCheck.score;                           // EMA: +15 / -20 / +8 / -5
-    conf += checkMACDAlignment(cs, raw.dir);          // MACD: +8 / -5
-    conf += checkSRProximity(cs, raw.entry, raw.dir); // S/R:  +8
-    conf += calcVolumeScore(cs, raw.dir);             // Vol:  +4 / -2
+    // ── GATE 3B: Multi-factor agreement (3 of 5 must be positive) ──
+    // The 5 scoring filters: candle, EMA, MACD, MTF, RSI/volume
+    const factorVotes = [
+      candleScore  > 0,                          // 1. Candle confirmation
+      emaCheck.score > 0,                        // 2. EMA alignment
+      macdScore    > 0,                          // 3. MACD direction
+      mtfCheck.score > 0,                        // 4. MTF (4H) agreement
+      rsiCheck.score > 0 || volScore > 0,        // 5. RSI or Volume (either counts)
+    ];
+    const positiveVotes = factorVotes.filter(Boolean).length;
 
-    // MTF bonus — only if same direction
-    const mtfCheck = await getMTFConfirmation(pair.id, raw.dir);
-    conf += mtfCheck.score; // MTF: +10 / -10
-
-    // HTF neutral = small bonus (no bias against us)
-    if (htfBias === 'neutral') conf += 3;
-
-    // Build filter labels for logging
-    const filters = [
-      emaCheck.label,
-      mtfCheck.label,
-      candleConfirmed ? `✓ ${candleName}` : '✗ NO CANDLE',
-    ].filter(Boolean).join(' · ');
-
-    // ── GATE 4: Minimum 85% threshold ─────────
-    conf = Math.min(Math.round(conf), 99);
-    if (conf < 72) {
-      console.log(`[APEX] REJECTED ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | Conf:${conf}% | ${filters}`);
+    if (positiveVotes < 3) {
+      console.log(`[APEX] SKIP ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | Only ${positiveVotes}/5 factors agree`);
       continue;
     }
+
+    // ── CONFIDENCE SCORE ──────────────────────
+    let conf = raw.conf;
+    conf += candleScore;       // +10 / -6
+    conf += emaCheck.score;    // +15 / +8 / -5 / -20
+    conf += macdScore;         // +8 / -5
+    conf += srScore;           // +8
+    conf += volScore;          // +4 / -2
+    conf += mtfCheck.score;    // +10 / -10 / 0
+    conf += rsiCheck.score;    // +12 / +5 / -8 / 0
+    if (htfBias === 'neutral') conf += 3;
+
+    // Bonus: more factors agreeing = higher conviction
+    if (positiveVotes === 5) conf += 5;
+    else if (positiveVotes === 4) conf += 2;
+
+    conf = Math.min(Math.round(conf), 99);
+
+    // ── GATE 4: 80% minimum ───────────────────
+    if (conf < 80) {
+      console.log(`[APEX] SKIP ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | ${conf}% < 80% | ${positiveVotes}/5 factors | ${emaCheck.label} · ${mtfCheck.label}`);
+      continue;
+    }
+
+    // Build readable filter summary for signal card
+    const filterParts = [
+      emaCheck.label,
+      mtfCheck.label,
+      rsiCheck.divergence ? rsiCheck.label : null,
+      candleConfirmed ? `✓ ${candleName}` : null,
+      `${positiveVotes}/5 factors`,
+    ].filter(Boolean);
+    const filters = filterParts.join(' · ');
 
     // Build signal levels
     const entry  = raw.entry || cur.close;
