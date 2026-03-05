@@ -2773,64 +2773,69 @@ function detectMarketStructure(cs, lb = 5) {
   const trend = bullTrend ? 'bull' : bearTrend ? 'bear' : 'neutral';
 
   // ── BOS DETECTION ─────────────────────────
-  // Break of Structure = price breaks the last significant swing high/low
   const bosEvents = [];
   const cur = cs[cs.length - 1];
 
-  // Bullish BOS: price breaks above most recent LH (in a downtrend reversal)
+  // Bullish BOS: price breaks above most recent LH
   const lastLH = [...highs].reverse().find(h => h.type === 'LH');
   if (lastLH && cur.close > lastLH.price) {
+    const swingCandle = cs[lastLH.i];
+    // Rectangle: from swing candle to break candle, height = swing candle body range
+    const rectTop    = swingCandle ? Math.max(swingCandle.open, swingCandle.close) * 1.0008 : lastLH.price * 1.001;
+    const rectBottom = swingCandle ? swingCandle.low : lastLH.price * 0.999;
     bosEvents.push({
-      type:    'BOS',
-      dir:     'bull',
-      price:   lastLH.price,
-      time:    lastLH.time,
-      breakTime: cur.time,
-      label:   'BOS ▲',
+      type: 'BOS', dir: 'bull',
+      price: lastLH.price,
+      time:  lastLH.time, breakTime: cur.time,
+      rectTop, rectBottom,
+      label: 'BOS ▲',
     });
   }
 
-  // Bearish BOS: price breaks below most recent HL (in an uptrend reversal)
+  // Bearish BOS: price breaks below most recent HL
   const lastHL = [...lows].reverse().find(l => l.type === 'HL');
   if (lastHL && cur.close < lastHL.price) {
+    const swingCandle = cs[lastHL.i];
+    const rectTop    = swingCandle ? swingCandle.high : lastHL.price * 1.001;
+    const rectBottom = swingCandle ? Math.min(swingCandle.open, swingCandle.close) * 0.9992 : lastHL.price * 0.999;
     bosEvents.push({
-      type:    'BOS',
-      dir:     'bear',
-      price:   lastHL.price,
-      time:    lastHL.time,
-      breakTime: cur.time,
-      label:   'BOS ▼',
+      type: 'BOS', dir: 'bear',
+      price: lastHL.price,
+      time:  lastHL.time, breakTime: cur.time,
+      rectTop, rectBottom,
+      label: 'BOS ▼',
     });
   }
 
   // ── CHoCH DETECTION ───────────────────────
-  // Change of Character = first break against the prevailing trend
   const chochEvents = [];
 
   if (trend === 'bull') {
-    // In uptrend, CHoCH = price breaks below last HL
     const lastHLchoch = [...lows].reverse().find(l => l.type === 'HL');
     if (lastHLchoch && cur.close < lastHLchoch.price) {
+      const swingCandle = cs[lastHLchoch.i];
+      const rectTop    = swingCandle ? swingCandle.high : lastHLchoch.price * 1.001;
+      const rectBottom = swingCandle ? Math.min(swingCandle.open, swingCandle.close) * 0.9992 : lastHLchoch.price * 0.999;
       chochEvents.push({
-        type:    'CHoCH',
-        dir:     'bear',
-        price:   lastHLchoch.price,
-        time:    lastHLchoch.time,
-        breakTime: cur.time,
-        label:   'CHoCH ▼',
+        type: 'CHoCH', dir: 'bear',
+        price: lastHLchoch.price,
+        time:  lastHLchoch.time, breakTime: cur.time,
+        rectTop, rectBottom,
+        label: 'CHoCH ▼',
       });
     }
   } else if (trend === 'bear') {
-    // In downtrend, CHoCH = price breaks above last LH
     const lastLHchoch = [...highs].reverse().find(h => h.type === 'LH');
     if (lastLHchoch && cur.close > lastLHchoch.price) {
+      const swingCandle = cs[lastLHchoch.i];
+      const rectTop    = swingCandle ? Math.max(swingCandle.open, swingCandle.close) * 1.0008 : lastLHchoch.price * 1.001;
+      const rectBottom = swingCandle ? swingCandle.low : lastLHchoch.price * 0.999;
       chochEvents.push({
-        type:    'CHoCH',
-        dir:     'bull',
-        price:   lastLHchoch.price,
-        time:    lastLHchoch.time,
-        breakTime: cur.time,
-        label:   'CHoCH ▲',
+        type: 'CHoCH', dir: 'bull',
+        price: lastLHchoch.price,
+        time:  lastLHchoch.time, breakTime: cur.time,
+        rectTop, rectBottom,
+        label: 'CHoCH ▲',
       });
     }
   }
@@ -2897,50 +2902,81 @@ function drawSMC(cs) {
   const smc = detectMarketStructure(cs, 5);
   window._smcData = smc;
 
-  // ── Draw BOS lines ─────────────────────────
+  // ── Draw BOS rectangles ────────────────────
   smc.bos.forEach(b => {
-    const color = b.dir === 'bull' ? 'rgba(0,230,118,0.7)' : 'rgba(255,61,87,0.7)';
-    const s = chart.addLineSeries({
-      color, lineWidth: 1, lineStyle: 1, // dashed
-      priceLineVisible: false, lastValueVisible: false,
-    });
-    s.setData([
-      { time: b.time,      value: b.price },
-      { time: b.breakTime, value: b.price },
-    ]);
-    // Label line
+    const fillColor   = b.dir === 'bull' ? 'rgba(0,230,118,0.08)'  : 'rgba(255,61,87,0.08)';
+    const borderColor = b.dir === 'bull' ? 'rgba(0,230,118,0.55)'  : 'rgba(255,61,87,0.55)';
+
+    // Top border
+    const sTop = chart.addLineSeries({ color: borderColor, lineWidth: 1, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sTop.setData([{ time: b.time, value: b.rectTop }, { time: b.breakTime, value: b.rectTop }]);
+
+    // Bottom border
+    const sBot = chart.addLineSeries({ color: borderColor, lineWidth: 1, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sBot.setData([{ time: b.time, value: b.rectBottom }, { time: b.breakTime, value: b.rectBottom }]);
+
+    // Left border
+    const sLeft = chart.addLineSeries({ color: borderColor, lineWidth: 1, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sLeft.setData([{ time: b.time, value: b.rectTop }, { time: b.time, value: b.rectBottom }]);
+
+    // Right border (at break candle)
+    const sRight = chart.addLineSeries({ color: borderColor, lineWidth: 2, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sRight.setData([{ time: b.breakTime, value: b.rectTop }, { time: b.breakTime, value: b.rectBottom }]);
+
+    // Fill — series of close lines spanning the zone height to simulate fill
+    const midFill = chart.addLineSeries({ color: fillColor, lineWidth: 24, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    const midPrice = (b.rectTop + b.rectBottom) / 2;
+    midFill.setData([{ time: b.time, value: midPrice }, { time: b.breakTime, value: midPrice }]);
+
+    // Label on price axis
     const labelLine = candleSeries.createPriceLine({
-      price: b.price,
-      color,
-      lineWidth: 1,
-      lineStyle: 1,
+      price: b.rectTop,
+      color: borderColor,
+      lineWidth: 1, lineStyle: 1,
       axisLabelVisible: true,
       title: b.label,
     });
-    window._smcSeries.push(s);
+
+    window._smcSeries.push(sTop, sBot, sLeft, sRight, midFill);
     window._smcPriceLines.push(labelLine);
   });
 
-  // ── Draw CHoCH lines ───────────────────────
+  // ── Draw CHoCH rectangles ──────────────────
   smc.choch.forEach(c => {
-    const color = c.dir === 'bull' ? 'rgba(179,136,255,0.8)' : 'rgba(255,201,71,0.8)';
-    const s = chart.addLineSeries({
-      color, lineWidth: 2, lineStyle: 0,
-      priceLineVisible: false, lastValueVisible: false,
-    });
-    s.setData([
-      { time: c.time,      value: c.price },
-      { time: c.breakTime, value: c.price },
-    ]);
+    const fillColor   = c.dir === 'bull' ? 'rgba(179,136,255,0.10)' : 'rgba(255,201,71,0.10)';
+    const borderColor = c.dir === 'bull' ? 'rgba(179,136,255,0.75)' : 'rgba(255,201,71,0.75)';
+
+    // Top border
+    const sTop = chart.addLineSeries({ color: borderColor, lineWidth: 1, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sTop.setData([{ time: c.time, value: c.rectTop }, { time: c.breakTime, value: c.rectTop }]);
+
+    // Bottom border
+    const sBot = chart.addLineSeries({ color: borderColor, lineWidth: 1, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sBot.setData([{ time: c.time, value: c.rectBottom }, { time: c.breakTime, value: c.rectBottom }]);
+
+    // Left border
+    const sLeft = chart.addLineSeries({ color: borderColor, lineWidth: 1, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sLeft.setData([{ time: c.time, value: c.rectTop }, { time: c.time, value: c.rectBottom }]);
+
+    // Right border
+    const sRight = chart.addLineSeries({ color: borderColor, lineWidth: 2, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sRight.setData([{ time: c.breakTime, value: c.rectTop }, { time: c.breakTime, value: c.rectBottom }]);
+
+    // Fill
+    const midFill = chart.addLineSeries({ color: fillColor, lineWidth: 24, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    const midPrice = (c.rectTop + c.rectBottom) / 2;
+    midFill.setData([{ time: c.time, value: midPrice }, { time: c.breakTime, value: midPrice }]);
+
+    // Label
     const labelLine = candleSeries.createPriceLine({
-      price: c.price,
-      color,
-      lineWidth: 2,
-      lineStyle: 0,
+      price: c.rectTop,
+      color: borderColor,
+      lineWidth: 1, lineStyle: 1,
       axisLabelVisible: true,
       title: c.label,
     });
-    window._smcSeries.push(s);
+
+    window._smcSeries.push(sTop, sBot, sLeft, sRight, midFill);
     window._smcPriceLines.push(labelLine);
   });
 
@@ -2985,8 +3021,8 @@ function drawSMC(cs) {
   });
 
   // ── Draw swing structure labels ────────────
-  // Add HH/HL/LH/LL markers on the candleSeries
-  const allPoints = [
+  // HH/HL/LH/LL markers
+  const structureMarkers = [
     ...smc.highs.slice(-6).map(h => ({
       time: h.time,
       position: 'aboveBar',
@@ -3003,7 +3039,47 @@ function drawSMC(cs) {
       text: l.type,
       size: 0.4,
     })),
-  ].sort((a, b) => a.time - b.time);
+  ];
+
+  // ── BOS inline markers ─────────────────────
+  // Draw at the candle where the break happened (breakTime)
+  smc.bos.forEach(b => {
+    structureMarkers.push({
+      time:     b.breakTime,
+      position: b.dir === 'bull' ? 'aboveBar' : 'belowBar',
+      shape:    b.dir === 'bull' ? 'arrowUp' : 'arrowDown',
+      color:    b.dir === 'bull' ? '#00e676' : '#ff3d57',
+      text:     'BOS',
+      size:     0.8,
+    });
+  });
+
+  // ── CHoCH inline markers ───────────────────
+  smc.choch.forEach(c => {
+    structureMarkers.push({
+      time:     c.breakTime,
+      position: c.dir === 'bull' ? 'aboveBar' : 'belowBar',
+      shape:    c.dir === 'bull' ? 'arrowUp' : 'arrowDown',
+      color:    c.dir === 'bull' ? '#b388ff' : '#ffc947',
+      text:     'CHoCH',
+      size:     1.0,
+    });
+  });
+
+  // ── FVG inline markers ─────────────────────
+  // Label placed at the midpoint candle of the 3-candle FVG formation
+  smc.fvg.forEach(f => {
+    structureMarkers.push({
+      time:     f.time,
+      position: f.dir === 'bull' ? 'belowBar' : 'aboveBar',
+      shape:    'circle',
+      color:    f.dir === 'bull' ? 'rgba(0,212,255,0.9)' : 'rgba(255,201,71,0.9)',
+      text:     `FVG ${(f.size * 100).toFixed(1)}%`,
+      size:     0.6,
+    });
+  });
+
+  const allPoints = structureMarkers.sort((a, b) => a.time - b.time);
 
   // Merge with existing signal markers
   const existingMarkers = window._signalMarkers || [];
