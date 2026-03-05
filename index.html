@@ -2758,138 +2758,145 @@ function detectMarketStructure(cs, lb = 5) {
   if (highs.length < 2 || lows.length < 2) return { bos: [], choch: [], fvg: [], trend: 'neutral' };
 
   // Label HH/HL/LH/LL
-  for (let i = 1; i < highs.length; i++) {
-    highs[i].type = highs[i].price > highs[i-1].price ? 'HH' : 'LH';
-  }
-  for (let i = 1; i < lows.length; i++) {
-    lows[i].type = lows[i].price > lows[i-1].price ? 'HL' : 'LL';
-  }
+  for (let i = 1; i < highs.length; i++) highs[i].type = highs[i].price > highs[i-1].price ? 'HH' : 'LH';
+  for (let i = 1; i < lows.length;  i++) lows[i].type  = lows[i].price  > lows[i-1].price  ? 'HL' : 'LL';
 
-  // Determine prevailing trend from last 3 swing points
-  const lastHighs = highs.slice(-3);
-  const lastLows  = lows.slice(-3);
-  const bullTrend = lastHighs.every(h => h.type === 'HH') && lastLows.every(l => l.type === 'HL');
-  const bearTrend = lastHighs.every(h => h.type === 'LH') && lastLows.every(l => l.type === 'LL');
-  const trend = bullTrend ? 'bull' : bearTrend ? 'bear' : 'neutral';
+  // Trend: use last 2 swings (more sensitive than requiring 3)
+  const recentHighs = highs.slice(-2);
+  const recentLows  = lows.slice(-2);
+  const bullTrend   = recentHighs.every(h => h.type === 'HH') && recentLows.every(l => l.type === 'HL');
+  const bearTrend   = recentHighs.every(h => h.type === 'LH') && recentLows.every(l => l.type === 'LL');
+  const trend       = bullTrend ? 'bull' : bearTrend ? 'bear' : 'neutral';
 
-  // ── BOS DETECTION ─────────────────────────
-  const bosEvents = [];
   const cur = cs[cs.length - 1];
 
-  // Bullish BOS: price breaks above most recent LH
+  // ── Helper: build rect from full wick of swing candle ──
+  function makeRect(swingIdx, dir) {
+    const sc = cs[swingIdx];
+    if (!sc) return { rectTop: 0, rectBottom: 0 };
+    // Use full wick high to low — gives a proper zone
+    const padding = (sc.high - sc.low) * 0.05; // 5% padding so box breathes
+    return {
+      rectTop:    sc.high + padding,
+      rectBottom: sc.low  - padding,
+    };
+  }
+
+  // ── BOS DETECTION ─────────────────────────────
+  const bosEvents = [];
+
+  // Bullish BOS: current close breaks above the most recent LH
   const lastLH = [...highs].reverse().find(h => h.type === 'LH');
   if (lastLH && cur.close > lastLH.price) {
-    const swingCandle = cs[lastLH.i];
-    // Rectangle: from swing candle to break candle, height = swing candle body range
-    const rectTop    = swingCandle ? Math.max(swingCandle.open, swingCandle.close) * 1.0008 : lastLH.price * 1.001;
-    const rectBottom = swingCandle ? swingCandle.low : lastLH.price * 0.999;
     bosEvents.push({
       type: 'BOS', dir: 'bull',
       price: lastLH.price,
-      time:  lastLH.time, breakTime: cur.time,
-      rectTop, rectBottom,
+      time:  lastLH.time,
+      breakTime: cur.time,
+      ...makeRect(lastLH.i, 'bull'),
       label: 'BOS ▲',
     });
   }
 
-  // Bearish BOS: price breaks below most recent HL
+  // Bearish BOS: current close breaks below the most recent HL
   const lastHL = [...lows].reverse().find(l => l.type === 'HL');
   if (lastHL && cur.close < lastHL.price) {
-    const swingCandle = cs[lastHL.i];
-    const rectTop    = swingCandle ? swingCandle.high : lastHL.price * 1.001;
-    const rectBottom = swingCandle ? Math.min(swingCandle.open, swingCandle.close) * 0.9992 : lastHL.price * 0.999;
     bosEvents.push({
       type: 'BOS', dir: 'bear',
       price: lastHL.price,
-      time:  lastHL.time, breakTime: cur.time,
-      rectTop, rectBottom,
+      time:  lastHL.time,
+      breakTime: cur.time,
+      ...makeRect(lastHL.i, 'bear'),
       label: 'BOS ▼',
     });
   }
 
-  // ── CHoCH DETECTION ───────────────────────
+  // ── CHoCH DETECTION ───────────────────────────
+  // CHoCH = first break AGAINST the current trend — more sensitive check
+  // Don't require perfect trend, just look for last swing in correct direction being broken
   const chochEvents = [];
 
-  if (trend === 'bull') {
-    const lastHLchoch = [...lows].reverse().find(l => l.type === 'HL');
-    if (lastHLchoch && cur.close < lastHLchoch.price) {
-      const swingCandle = cs[lastHLchoch.i];
-      const rectTop    = swingCandle ? swingCandle.high : lastHLchoch.price * 1.001;
-      const rectBottom = swingCandle ? Math.min(swingCandle.open, swingCandle.close) * 0.9992 : lastHLchoch.price * 0.999;
+  // Bearish CHoCH: in a bull run, price breaks below the most recent HL
+  // (we check the most recent HL regardless of whether trend is perfectly bullish)
+  const lastHLforChoch = [...lows].reverse().find(l => l.type === 'HL');
+  if (lastHLforChoch && cur.close < lastHLforChoch.price) {
+    // Only fire CHoCH if NOT already a confirmed bear trend (otherwise it's just BOS)
+    if (trend !== 'bear') {
       chochEvents.push({
         type: 'CHoCH', dir: 'bear',
-        price: lastHLchoch.price,
-        time:  lastHLchoch.time, breakTime: cur.time,
-        rectTop, rectBottom,
+        price: lastHLforChoch.price,
+        time:  lastHLforChoch.time,
+        breakTime: cur.time,
+        ...makeRect(lastHLforChoch.i, 'bear'),
         label: 'CHoCH ▼',
       });
     }
-  } else if (trend === 'bear') {
-    const lastLHchoch = [...highs].reverse().find(h => h.type === 'LH');
-    if (lastLHchoch && cur.close > lastLHchoch.price) {
-      const swingCandle = cs[lastLHchoch.i];
-      const rectTop    = swingCandle ? Math.max(swingCandle.open, swingCandle.close) * 1.0008 : lastLHchoch.price * 1.001;
-      const rectBottom = swingCandle ? swingCandle.low : lastLHchoch.price * 0.999;
+  }
+
+  // Bullish CHoCH: in a bear run, price breaks above the most recent LH
+  const lastLHforChoch = [...highs].reverse().find(h => h.type === 'LH');
+  if (lastLHforChoch && cur.close > lastLHforChoch.price) {
+    if (trend !== 'bull') {
       chochEvents.push({
         type: 'CHoCH', dir: 'bull',
-        price: lastLHchoch.price,
-        time:  lastLHchoch.time, breakTime: cur.time,
-        rectTop, rectBottom,
+        price: lastLHforChoch.price,
+        time:  lastLHforChoch.time,
+        breakTime: cur.time,
+        ...makeRect(lastLHforChoch.i, 'bull'),
         label: 'CHoCH ▲',
       });
     }
   }
 
-  // ── FAIR VALUE GAP (FVG) / LIQUIDITY GAP ──
-  // FVG = 3-candle pattern where candle 1 and candle 3 don't overlap
-  // Gap between candle 1's wick and candle 3's wick = imbalance zone
+  // ── FVG DETECTION — cleaner, max 2 unfilled ───
   const fvgEvents = [];
-  const lookback = Math.min(cs.length - 1, 40);
+  const lookback  = Math.min(cs.length - 2, 60); // scan last 60 candles
 
   for (let i = cs.length - lookback; i < cs.length - 2; i++) {
     const c1 = cs[i];
-    const c2 = cs[i + 1]; // the impulse candle
+    const c2 = cs[i + 1];
     const c3 = cs[i + 2];
 
-    // Bullish FVG: c1 high < c3 low (gap between them)
+    // Bullish FVG: gap between c1's high and c3's low
     if (c3.low > c1.high) {
       const gapSize = (c3.low - c1.high) / c1.high;
-      if (gapSize >= 0.003) { // min 0.3% gap to be meaningful
-        fvgEvents.push({
-          type:    'FVG',
-          dir:     'bull',
-          top:     c3.low,
-          bottom:  c1.high,
-          time:    c2.time,
-          endTime: cur.time + 3600 * 20,
-          label:   'FVG ▲',
-          size:    gapSize,
-          filled:  cur.low <= c3.low, // filled if price returned to it
-        });
+      if (gapSize >= 0.004) { // raised to 0.4% — filters tiny noise gaps
+        // Check if ANY subsequent candle has filled this gap
+        const filledByLater = cs.slice(i + 3).some(fc => fc.low <= c3.low);
+        if (!filledByLater) {
+          fvgEvents.push({
+            type: 'FVG', dir: 'bull',
+            top: c3.low, bottom: c1.high,
+            time: c2.time,
+            endTime: cur.time + 3600 * 30,
+            label: 'FVG ▲',
+            size: gapSize,
+          });
+        }
       }
     }
 
-    // Bearish FVG: c1 low > c3 high (gap below)
+    // Bearish FVG: gap between c3's high and c1's low
     if (c1.low > c3.high) {
       const gapSize = (c1.low - c3.high) / c3.high;
-      if (gapSize >= 0.003) {
-        fvgEvents.push({
-          type:    'FVG',
-          dir:     'bear',
-          top:     c1.low,
-          bottom:  c3.high,
-          time:    c2.time,
-          endTime: cur.time + 3600 * 20,
-          label:   'FVG ▼',
-          size:    gapSize,
-          filled:  cur.high >= c1.low,
-        });
+      if (gapSize >= 0.004) {
+        const filledByLater = cs.slice(i + 3).some(fc => fc.high >= c1.low);
+        if (!filledByLater) {
+          fvgEvents.push({
+            type: 'FVG', dir: 'bear',
+            top: c1.low, bottom: c3.high,
+            time: c2.time,
+            endTime: cur.time + 3600 * 30,
+            label: 'FVG ▼',
+            size: gapSize,
+          });
+        }
       }
     }
   }
 
-  // Keep only the most recent 4 unfilled FVGs
-  const unfilled = fvgEvents.filter(f => !f.filled).slice(-4);
+  // Keep only 2 most recent unfilled FVGs — reduces clutter significantly
+  const unfilled = fvgEvents.slice(-2);
 
   return { bos: bosEvents, choch: chochEvents, fvg: unfilled, trend, highs, lows };
 }
