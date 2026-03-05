@@ -841,6 +841,16 @@ html, body {
       <button class="ind-btn rsi"     data-ind="rsi">RSI</button>
       <button class="ind-btn macd"    data-ind="macd">MACD</button>
       <button class="ch-btn" id="chBtn">⟋ CHANNEL</button>
+      <button class="ch-btn" id="smcBtn">◈ SMC</button>
+      <div id="candleCountdown" style="
+        margin-left:auto;padding:4px 10px;border-radius:3px;
+        border:1px solid var(--border2);background:var(--bg2);
+        font-family:'JetBrains Mono',monospace;font-size:9px;
+        letter-spacing:1px;color:var(--muted);display:flex;gap:6px;align-items:center;
+      ">
+        <span style="opacity:0.5">CANDLE</span>
+        <span id="candleCountdownVal" style="color:var(--text1);font-weight:700">--:--</span>
+      </div>
     </div>
   </div>
   <div class="clock" id="clock">--:--:-- UTC</div>
@@ -1072,6 +1082,28 @@ function fmtVol(v) {
 }
 function nowMs() { return Date.now(); }
 function ageMin(ms) { return Math.floor((nowMs() - ms) / 60000); }
+
+// Human-readable relative time: "just now", "5m ago", "2h ago", "3d ago"
+function relativeTime(ms) {
+  const diff = nowMs() - ms;
+  const secs = Math.floor(diff / 1000);
+  const mins = Math.floor(diff / 60000);
+  const hrs  = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  if (secs < 60)  return 'just now';
+  if (mins < 60)  return `${mins}m ago`;
+  if (hrs  < 24)  return `${hrs}h ${mins % 60}m ago`;
+  return `${days}d ago`;
+}
+
+// Format a timestamp as HH:MM:SS in local time
+function fmtTime(ms) {
+  const d = new Date(ms);
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mm = String(d.getMinutes()).padStart(2,'0');
+  const ss = String(d.getSeconds()).padStart(2,'0');
+  return `${hh}:${mm}:${ss}`;
+}
 
 // ═══════════════════════════════════════════════
 // API — Binance REST with fallback hosts
@@ -1725,79 +1757,78 @@ function updateSignalStatuses(price, pairId) {
   Object.values(signals)
     .filter(s => s.pairId === pairId && !s.standalone)
     .forEach(s => {
-      const terminal = ['expired','sl_hit','tp3_hit'];
-      if (terminal.includes(s.status)) return;
+      // Only skip permanently closed signals
+      if (['sl_hit','tp3_hit'].includes(s.status)) return;
+      // tp1_hit and tp2_hit signals stay alive — never skip them
+      // expired signals: only skip if manually expired (not 70% rule — handled below)
+      if (s.status === 'expired' && !s.tp2Promoted) return;
 
-      // Always update latest price
       s.latestPrice = price;
+      const dir = s.dir;
 
-      // ── EXPIRY CHECK (pending only) ────────
+      // ── TIME EXPIRY (pending only, not entered) ────
       if (s.status === 'pending' && ageMin(s.detectedAt) >= EXP_MINS) {
-        s.status = 'expired';
-        fireAlert(`⏰ EXPIRED — ${s.sym} ${s.pattern}`, 'sl');
-        playTone([440, 400], 'triangle');
-        logToJournal(s, 'expired');
+        expireSignal(s, 'time');
         changed = true;
-        // Immediately clear chart lines for this pair
-        if (s.pairId === activePair.id) {
-          const remaining = Object.values(signals).filter(x =>
-            x.pairId === s.pairId && !['expired','sl_hit','tp3_hit'].includes(x.status) && !x.standalone
-          );
-          drawSignalLines(remaining);
-          setChartMarkers(remaining);
-        }
         return;
       }
 
-      const dir = s.dir;
-
-      // ── SL CHECK (active trades only) ─────
-      if (s.status !== 'pending') {
+      // ── SL CHECK ──────────────────────────────────
+      // For entered/tp1_hit/tp2_hit — check SL
+      if (['entered','tp1_hit','tp2_hit'].includes(s.status)) {
         if (dir === 'long'  && price <= s.sl) { markHit(s, 'sl_hit'); changed = true; return; }
         if (dir === 'short' && price >= s.sl) { markHit(s, 'sl_hit'); changed = true; return; }
       }
 
-      // ── TP SEQUENCE ───────────────────────
-      if (s.status !== 'pending') {
-        // TP3
+      // ── TP SEQUENCE ───────────────────────────────
+      if (['entered','tp1_hit','tp2_hit'].includes(s.status)) {
+
+        // TP3 — full target, remove signal
         if (!s.aTp3 && s.tp3) {
           if ((dir==='long' && price >= s.tp3) || (dir==='short' && price <= s.tp3)) {
             s.aTp3 = true; s.aTp2 = true; s.aTp1 = true;
-            s.status = 'tp3_hit';
-            s.closedAt = Date.now(); s.closePrice = price;
-            fireAlert(`🎯 TP3 HIT — ${s.sym} · Full target reached!`, 'tp');
-            playTone([880,1100,1320,1540]);
+            s.status    = 'tp3_hit';
+            s.closedAt  = Date.now();
+            s.closePrice = price;
+            fireTP3Alert(s);
             logToJournal(s, 'tp3');
+            refreshChartLines(s.pairId);
             changed = true; return;
           }
         }
+
         // TP2
         if (!s.aTp2 && s.tp2) {
           if ((dir==='long' && price >= s.tp2) || (dir==='short' && price <= s.tp2)) {
             s.aTp2 = true; s.aTp1 = true;
             s.status = 'tp2_hit';
-            fireAlert(`✅ TP2 HIT — ${s.sym} · Move SL to TP1`, 'tp');
-            playTone([880,1100,1320]);
+            fireTP2Alert(s);
+            logToJournal(s, 'tp2');
             changed = true;
           }
         }
-        // TP1
+
+        // TP1 — stay on panel, fire long celebration, spawn TP2 signal
         if (!s.aTp1 && s.tp1) {
           if ((dir==='long' && price >= s.tp1) || (dir==='short' && price <= s.tp1)) {
-            s.aTp1 = true;
-            s.status = 'tp1_hit';
-            fireAlert(`🟢 TP1 HIT — ${s.sym} · Move SL to breakeven`, 'tp');
-            playTone([880,1100]);
+            s.aTp1      = true;
+            s.status    = 'tp1_hit';
+            s.tp1HitAt  = Date.now();
+            s.tp1Price  = price;
+            fireTP1Alert(s, price);
+            logToJournal(s, 'tp1');
+            // Spawn TP2 progression signal
+            spawnTP2Signal(s, price);
             changed = true;
           }
         }
       }
 
-      // ── ENTRY ZONE CHECK ──────────────────
+      // ── ENTRY ZONE CHECK ──────────────────────────
       if (s.status === 'pending') {
         const dist = Math.abs(price - s.entry) / s.entry;
 
-        // Near-zone warning (within 1%)
+        // Approaching warning
         if (dist <= 0.01 && !s.aNearEntry) {
           s.aNearEntry = true;
           fireAlert(`⚠️ APPROACHING ENTRY — ${s.sym} · ${(dist*100).toFixed(2)}% away`, 'candle');
@@ -1805,16 +1836,35 @@ function updateSignalStatuses(price, pairId) {
           changed = true;
         }
 
-        // Entry hit
+        // Entry triggered
         if (dist <= ENTRY_TOL_PCT && !s.aEntry) {
-          s.aEntry    = true;
-          s.status    = 'entered';
-          s.entryPrice = price; // lock in actual entry price
+          s.aEntry     = true;
+          s.status     = 'entered';
+          s.entryPrice = price;
           s.enteredAt  = Date.now();
-          fireAlert(`⚡ ENTRY TRIGGERED — ${s.sym} ${s.dir.toUpperCase()} @ $${price.toFixed(activePair.dec)}`, 'entry');
+          fireAlert(`⚡ ENTRY TRIGGERED — ${s.sym} ${s.dir.toUpperCase()} @ ${fmt(price, activePair.dec)}`, 'entry');
           playTone([660,880,1100]);
           flashChart('entry');
           changed = true;
+        }
+      }
+
+      // ── 70% TO TP1 EXPIRY RULE ────────────────────
+      // Applies to ALL statuses — if price passes entry and reaches 70% to TP1
+      // without being entered, signal is stale — expire it
+      if (!s.aEntry && s.tp1 && s.entry) {
+        const totalMove = Math.abs(s.tp1 - s.entry);
+        const priceMoved = s.dir === 'long'
+          ? price - s.entry
+          : s.entry - price;
+        const progress = priceMoved / totalMove;
+
+        if (progress >= 0.70 && !s.a70pct) {
+          s.a70pct = true;
+          // Price blew past entry without triggering — signal is now stale
+          expireSignal(s, '70pct');
+          changed = true;
+          return;
         }
       }
 
@@ -1822,27 +1872,169 @@ function updateSignalStatuses(price, pairId) {
     });
 }
 
+// ── EXPIRY HANDLER ────────────────────────────
+function expireSignal(s, reason) {
+  s.status  = 'expired';
+  s.expiredAt = Date.now();
+  s.expiredReason = reason;
+  logToJournal(s, 'expired');
+  // Silently clear — no alert for expiry, just remove from panel
+  refreshChartLines(s.pairId);
+  saveSignals();
+}
+
+// ── SL HIT — remove immediately, long alert ───
 function markHit(s, status) {
-  s.status    = status;
-  s.closedAt  = Date.now();
+  s.status     = status;
+  s.closedAt   = Date.now();
   s.closePrice = s.latestPrice;
+
   if (status === 'sl_hit') {
-    const pnl = calcLivePnL(s, s.latestPrice);
+    const pnl    = calcLivePnL(s, s.latestPrice);
     const pnlStr = pnl ? ` · ${pnl.r}R` : '';
-    fireAlert(`🛑 STOPPED OUT — ${s.sym}${pnlStr}`, 'sl');
-    playTone([440,330,220], 'sawtooth');
+
+    // Long echoing SL alert — 3 descending tones with longer decay
+    fireLongAlert(`🛑 STOPPED OUT — ${s.sym}${pnlStr} · SL @ ${fmt(s.sl, activePair.dec)}`, 'sl');
+    playLongTone([440,330,220,180], 'sawtooth', 0.5);
     flashChart('short');
     logToJournal(s, 'sl');
+
+    // Remove from panel immediately — delete from signals object
+    setTimeout(() => {
+      delete signals[s.id];
+      saveSignals();
+      renderSignals();
+    }, 4500); // wait for alert to finish showing
   }
-  // Clear chart lines immediately when trade closes
-  if (s.pairId === activePair.id) {
-    const remaining = Object.values(signals).filter(x =>
-      x.pairId === s.pairId && !['expired','sl_hit','tp3_hit'].includes(x.status) && !x.standalone
-    );
-    drawSignalLines(remaining);
-    setChartMarkers(remaining);
-  }
+
+  refreshChartLines(s.pairId);
   saveSignals();
+}
+
+// ── TP ALERT FUNCTIONS ────────────────────────
+function fireTP1Alert(s, price) {
+  // Long celebration — multiple echoes
+  const msg = `🟢 TP1 HIT — ${s.sym} · +${Math.abs(((price - s.entry) / s.entry) * 100).toFixed(2)}% · Move SL to Breakeven`;
+  fireLongAlert(msg, 'tp');
+  playLongTone([660, 784, 880, 1046, 1318], 'sine', 0.4);
+  flashChart('long');
+}
+
+function fireTP2Alert(s) {
+  const msg = `✅ TP2 HIT — ${s.sym} · Secure profits · Move SL to TP1`;
+  fireLongAlert(msg, 'tp');
+  playLongTone([784, 880, 1046, 1318, 1568], 'sine', 0.35);
+  flashChart('long');
+}
+
+function fireTP3Alert(s) {
+  const msg = `🎯 TP3 HIT — ${s.sym} · FULL TARGET REACHED! 🚀`;
+  fireLongAlert(msg, 'tp');
+  playLongTone([880, 1046, 1318, 1568, 1760, 2093], 'sine', 0.3);
+  flashChart('long');
+}
+
+// ── SPAWN TP2 PROGRESSION SIGNAL ─────────────
+function spawnTP2Signal(s, currentPrice) {
+  if (!s.tp2) return;
+
+  // New SL = current price ± small buffer (breakeven style, 0.3% buffer)
+  const buffer = currentPrice * 0.003;
+  const newSL  = s.dir === 'long' ? currentPrice - buffer : currentPrice + buffer;
+
+  // Risk from current price to TP2
+  const risk   = Math.abs(s.tp2 - currentPrice);
+  const newTP1 = s.tp2; // old TP2 becomes new TP1
+  const newTP2 = s.dir === 'long' ? currentPrice + risk * 1.5 : currentPrice - risk * 1.5;
+  const newTP3 = s.dir === 'long' ? currentPrice + risk * 2.5 : currentPrice - risk * 2.5;
+
+  const key = `${s.sym}_${s.dir}_TP2prog_${Math.floor(Date.now()/3600000)}`;
+  if (signals[key]) return; // already spawned
+
+  const newSig = {
+    id:           key,
+    pairId:       s.pairId,
+    sym:          s.sym,
+    pattern:      s.pattern + ' (TP2 RUN)',
+    candlePattern: s.candlePattern,
+    dir:          s.dir,
+    entry:        currentPrice,
+    entryPrice:   currentPrice,
+    enteredAt:    Date.now(),
+    sl:           newSL,
+    tp1:          newTP1,
+    tp2:          newTP2,
+    tp3:          newTP3,
+    htfBias:      s.htfBias,
+    confidence:   Math.min(s.confidence + 5, 99), // slightly higher — TP1 already proved direction
+    filters:      s.filters,
+    status:       'entered', // already in trade
+    aEntry:       true,
+    detectedAt:   Date.now(),
+    latestPrice:  currentPrice,
+    tp2Promoted:  true, // flag so we know origin
+    parentId:     s.id,
+  };
+
+  signals[key] = newSig;
+  saveSignals();
+
+  fireAlert(`🔄 TP2 SIGNAL SPAWNED — ${s.sym} · New target: ${fmt(newTP1, activePair.dec)}`, 'entry');
+  playTone([523, 659, 784, 880], 'sine');
+
+  if (s.pairId === activePair.id) {
+    drawSignalLines(Object.values(signals).filter(x =>
+      x.pairId === s.pairId && !['expired','sl_hit','tp3_hit'].includes(x.status) && !x.standalone
+    ));
+    renderSignals();
+  }
+}
+
+// ── LONG ECHOING ALERT ────────────────────────
+function fireLongAlert(msg, type) {
+  // Remove existing
+  document.querySelectorAll('.alert-banner').forEach(b => b.remove());
+
+  const b = document.createElement('div');
+  b.className = `alert-banner ${type}`;
+  b.textContent = msg;
+  b.style.cssText += ';animation:bIn 0.3s ease, bOut 0.4s ease 5.6s forwards;';
+  document.body.appendChild(b);
+  setTimeout(() => b.remove(), 6200); // longer display
+
+  if (Notification?.permission === 'granted') {
+    new Notification('APEX TERMINAL', { body: msg, tag: 'apex-' + type });
+  }
+}
+
+// ── LONGER TONE (for TP/SL events) ───────────
+function playLongTone(freqs, wave = 'sine', gap = 0.25) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    freqs.forEach((f, i) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.connect(g); g.connect(audioCtx.destination);
+      o.frequency.value = f;
+      o.type = wave;
+      const t = audioCtx.currentTime + i * gap;
+      g.gain.setValueAtTime(0.15, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.5); // longer decay
+      o.start(t); o.stop(t + 0.55);
+    });
+  } catch(e) {}
+}
+
+// ── REFRESH CHART LINES HELPER ────────────────
+function refreshChartLines(pairId) {
+  if (pairId !== activePair.id) return;
+  const active = Object.values(signals).filter(x =>
+    x.pairId === pairId &&
+    !['expired','sl_hit','tp3_hit'].includes(x.status) &&
+    !x.standalone
+  );
+  drawSignalLines(active);
+  setChartMarkers(active);
 }
 
 function saveSignals() {
@@ -1956,9 +2148,10 @@ async function loadPair(pair, tf) {
     // Update watchbar prices
     updateWatchbarItem(pair.id, price, change);
 
-    // Draw S/R levels and Order Blocks immediately on load
+    // Draw S/R levels, Order Blocks, and SMC structure
     drawSRLevels(cs);
     drawOrderBlocks(cs);
+    if (showSMC) drawSMC(cs);
 
     // Render signals
     renderSignals();
@@ -1977,9 +2170,9 @@ async function loadPair(pair, tf) {
 function renderSignals() {
   const wrap = document.getElementById('signalsWrap');
   const pairSigs = Object.values(signals)
-    .filter(s => s.pairId === activePair.id && !s.standalone)
+    .filter(s => s.pairId === activePair.id && !s.standalone
+      && !['expired','sl_hit','tp3_hit'].includes(s.status))
     .sort((a,b) => {
-      // Active trades first, then pending, then closed
       const rank = s => ['entered','tp1_hit','tp2_hit'].includes(s.status) ? 0
                       : s.status === 'pending' ? 1 : 2;
       return rank(a) - rank(b) || b.detectedAt - a.detectedAt;
@@ -2013,19 +2206,20 @@ function renderSignals() {
         <span class="pnl-r">${pnl.positive?'+':''}${pnl.r}R</span>
       </div>` : '';
 
-    // Time display
+    // Time display — exact clock time + human relative label
+    const firedAt   = s.enteredAt || s.detectedAt;
+    const clockTime = fmtTime(firedAt);
+    const relTime   = relativeTime(firedAt);
     const timeLabel = isActive && s.enteredAt
-      ? `IN TRADE · ${ageMin(s.enteredAt)}m`
-      : `${age}m ago`;
+      ? `⚡ IN TRADE · ${fmtTime(s.enteredAt)} · ${relativeTime(s.enteredAt)}`
+      : `🕐 ${clockTime} · ${relTime}`;
 
     return `<div class="sig-card ${s.dir} ${isClosed ? 'closed' : ''} ${isActive ? 'active-trade' : ''}">
       <div class="sc-head">
         <div class="sc-type ${s.dir}">${s.dir === 'long' ? '▲ LONG' : '▼ SHORT'} · ${s.sym}</div>
-        <div style="display:flex;gap:4px;align-items:center">
-          <div class="sc-conf ${s.confidence >= 80 ? 'high' : 'med'}">${s.confidence}%</div>
-          <div style="font-size:8px;color:var(--muted);letter-spacing:0.5px">${timeLabel}</div>
-        </div>
+        <div class="sc-conf ${s.confidence >= 80 ? 'high' : 'med'}">${s.confidence}%</div>
       </div>
+      <div style="font-size:8px;color:var(--muted);letter-spacing:0.4px;margin-bottom:6px;line-height:1.8">${timeLabel}</div>
       <div class="sc-pattern">📐 ${s.pattern}${s.candlePattern ? ' · 🕯 ' + s.candlePattern : ''}</div>
       ${s.filters ? `<div style="font-size:8px;color:var(--muted);letter-spacing:0.5px;margin-bottom:6px;line-height:1.6">${s.filters}</div>` : ''}
 
@@ -2074,8 +2268,27 @@ function renderSignals() {
       </div>
 
       ${s.candlePattern ? `<div class="candle-badges"><span class="cbadge ${s.dir==='long'?'bull':'bear'}">${s.candlePattern}</span></div>` : ''}
+
+      ${['tp1_hit','tp2_hit'].includes(s.status) ? `
+      <button onclick="dismissSignal('${s.id}')" style="
+        margin-top:8px;width:100%;padding:4px;border:1px solid var(--border2);
+        border-radius:3px;background:transparent;color:var(--muted);
+        font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;
+        cursor:pointer;transition:all 0.15s;"
+        onmouseover="this.style.borderColor='var(--red)';this.style.color='var(--red)'"
+        onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--muted)'">
+        ✕ DISMISS SIGNAL
+      </button>` : ''}
     </div>`;
   }).join('');
+}
+
+function dismissSignal(id) {
+  if (!signals[id]) return;
+  delete signals[id];
+  saveSignals();
+  refreshChartLines(activePair.id);
+  renderSignals();
 }
 
 function statusLabel(s) {
@@ -2271,6 +2484,10 @@ async function switchPair(p) {
   // Clear SR and OB lines from previous pair
   if (window._srLines) { window._srLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} }); window._srLines = []; }
   if (window._obSeries) { window._obSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} }); window._obSeries = []; }
+  clearSMC();
+  // Remove SMC panel
+  const smcPanel = document.getElementById('smcPanel');
+  if (smcPanel) smcPanel.remove();
   await loadPair(p, activeTF);
 }
 
@@ -2342,6 +2559,46 @@ document.getElementById('chBtn').addEventListener('click', () => {
   if (showChannel && candles.length) drawChannel(candles);
   else clearChannel();
 });
+
+// SMC toggle
+let showSMC = true; // on by default
+document.getElementById('smcBtn').classList.add('on');
+document.getElementById('smcBtn').addEventListener('click', () => {
+  showSMC = !showSMC;
+  document.getElementById('smcBtn').classList.toggle('on', showSMC);
+  if (showSMC && candles.length) drawSMC(candles);
+  else {
+    clearSMC();
+    const smcPanel = document.getElementById('smcPanel');
+    if (smcPanel) smcPanel.remove();
+  }
+});
+
+// ── CANDLE COUNTDOWN TIMER ────────────────────
+const TF_SECONDS = { '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
+
+function updateCandleCountdown() {
+  const el = document.getElementById('candleCountdownVal');
+  if (!el) return;
+  const tfSecs = TF_SECONDS[activeTF] || 3600;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const remaining = tfSecs - (nowSec % tfSecs);
+  const mm = String(Math.floor(remaining / 60)).padStart(2, '0');
+  const ss = String(remaining % 60).padStart(2, '0');
+
+  // Color shifts as candle nears close
+  const pct = remaining / tfSecs;
+  el.style.color = pct < 0.05 ? '#ff3d57'   // last 5% — red
+                 : pct < 0.15 ? '#ffc947'   // last 15% — amber
+                 : 'var(--text1)';
+
+  el.textContent = remaining >= 3600
+    ? `${Math.floor(remaining/3600)}h ${mm}m`
+    : `${mm}:${ss}`;
+}
+
+setInterval(updateCandleCountdown, 1000);
+updateCandleCountdown();
 
 // Tabs
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -2473,6 +2730,367 @@ function drawOrderBlocks(cs) {
     ]);
     window._obSeries.push(s, s2);
   });
+}
+
+// ═══════════════════════════════════════════════
+// SMC ENGINE — BOS · CHoCH · FVG · TREND
+// ═══════════════════════════════════════════════
+
+// ── STRUCTURE POINT DETECTION ─────────────────
+// Returns labeled swing points with structure context
+function detectMarketStructure(cs, lb = 5) {
+  if (cs.length < lb * 3) return { bos: [], choch: [], fvg: [], trend: 'neutral' };
+
+  const highs = [], lows = [];
+
+  // Find swing highs and lows
+  for (let i = lb; i < cs.length - lb; i++) {
+    let isH = true, isL = true;
+    for (let j = i - lb; j <= i + lb; j++) {
+      if (j === i) continue;
+      if (cs[j].high >= cs[i].high) isH = false;
+      if (cs[j].low  <= cs[i].low)  isL = false;
+    }
+    if (isH) highs.push({ i, price: cs[i].high, time: cs[i].time, type: 'HH' });
+    if (isL) lows.push({  i, price: cs[i].low,  time: cs[i].time, type: 'LL' });
+  }
+
+  if (highs.length < 2 || lows.length < 2) return { bos: [], choch: [], fvg: [], trend: 'neutral' };
+
+  // Label HH/HL/LH/LL
+  for (let i = 1; i < highs.length; i++) {
+    highs[i].type = highs[i].price > highs[i-1].price ? 'HH' : 'LH';
+  }
+  for (let i = 1; i < lows.length; i++) {
+    lows[i].type = lows[i].price > lows[i-1].price ? 'HL' : 'LL';
+  }
+
+  // Determine prevailing trend from last 3 swing points
+  const lastHighs = highs.slice(-3);
+  const lastLows  = lows.slice(-3);
+  const bullTrend = lastHighs.every(h => h.type === 'HH') && lastLows.every(l => l.type === 'HL');
+  const bearTrend = lastHighs.every(h => h.type === 'LH') && lastLows.every(l => l.type === 'LL');
+  const trend = bullTrend ? 'bull' : bearTrend ? 'bear' : 'neutral';
+
+  // ── BOS DETECTION ─────────────────────────
+  // Break of Structure = price breaks the last significant swing high/low
+  const bosEvents = [];
+  const cur = cs[cs.length - 1];
+
+  // Bullish BOS: price breaks above most recent LH (in a downtrend reversal)
+  const lastLH = [...highs].reverse().find(h => h.type === 'LH');
+  if (lastLH && cur.close > lastLH.price) {
+    bosEvents.push({
+      type:    'BOS',
+      dir:     'bull',
+      price:   lastLH.price,
+      time:    lastLH.time,
+      breakTime: cur.time,
+      label:   'BOS ▲',
+    });
+  }
+
+  // Bearish BOS: price breaks below most recent HL (in an uptrend reversal)
+  const lastHL = [...lows].reverse().find(l => l.type === 'HL');
+  if (lastHL && cur.close < lastHL.price) {
+    bosEvents.push({
+      type:    'BOS',
+      dir:     'bear',
+      price:   lastHL.price,
+      time:    lastHL.time,
+      breakTime: cur.time,
+      label:   'BOS ▼',
+    });
+  }
+
+  // ── CHoCH DETECTION ───────────────────────
+  // Change of Character = first break against the prevailing trend
+  const chochEvents = [];
+
+  if (trend === 'bull') {
+    // In uptrend, CHoCH = price breaks below last HL
+    const lastHLchoch = [...lows].reverse().find(l => l.type === 'HL');
+    if (lastHLchoch && cur.close < lastHLchoch.price) {
+      chochEvents.push({
+        type:    'CHoCH',
+        dir:     'bear',
+        price:   lastHLchoch.price,
+        time:    lastHLchoch.time,
+        breakTime: cur.time,
+        label:   'CHoCH ▼',
+      });
+    }
+  } else if (trend === 'bear') {
+    // In downtrend, CHoCH = price breaks above last LH
+    const lastLHchoch = [...highs].reverse().find(h => h.type === 'LH');
+    if (lastLHchoch && cur.close > lastLHchoch.price) {
+      chochEvents.push({
+        type:    'CHoCH',
+        dir:     'bull',
+        price:   lastLHchoch.price,
+        time:    lastLHchoch.time,
+        breakTime: cur.time,
+        label:   'CHoCH ▲',
+      });
+    }
+  }
+
+  // ── FAIR VALUE GAP (FVG) / LIQUIDITY GAP ──
+  // FVG = 3-candle pattern where candle 1 and candle 3 don't overlap
+  // Gap between candle 1's wick and candle 3's wick = imbalance zone
+  const fvgEvents = [];
+  const lookback = Math.min(cs.length - 1, 40);
+
+  for (let i = cs.length - lookback; i < cs.length - 2; i++) {
+    const c1 = cs[i];
+    const c2 = cs[i + 1]; // the impulse candle
+    const c3 = cs[i + 2];
+
+    // Bullish FVG: c1 high < c3 low (gap between them)
+    if (c3.low > c1.high) {
+      const gapSize = (c3.low - c1.high) / c1.high;
+      if (gapSize >= 0.003) { // min 0.3% gap to be meaningful
+        fvgEvents.push({
+          type:    'FVG',
+          dir:     'bull',
+          top:     c3.low,
+          bottom:  c1.high,
+          time:    c2.time,
+          endTime: cur.time + 3600 * 20,
+          label:   'FVG ▲',
+          size:    gapSize,
+          filled:  cur.low <= c3.low, // filled if price returned to it
+        });
+      }
+    }
+
+    // Bearish FVG: c1 low > c3 high (gap below)
+    if (c1.low > c3.high) {
+      const gapSize = (c1.low - c3.high) / c3.high;
+      if (gapSize >= 0.003) {
+        fvgEvents.push({
+          type:    'FVG',
+          dir:     'bear',
+          top:     c1.low,
+          bottom:  c3.high,
+          time:    c2.time,
+          endTime: cur.time + 3600 * 20,
+          label:   'FVG ▼',
+          size:    gapSize,
+          filled:  cur.high >= c1.low,
+        });
+      }
+    }
+  }
+
+  // Keep only the most recent 4 unfilled FVGs
+  const unfilled = fvgEvents.filter(f => !f.filled).slice(-4);
+
+  return { bos: bosEvents, choch: chochEvents, fvg: unfilled, trend, highs, lows };
+}
+
+// ── SMC DRAWING ENGINE ────────────────────────
+function drawSMC(cs) {
+  clearSMC();
+  if (!candleSeries || !chart) return;
+
+  const smc = detectMarketStructure(cs, 5);
+  window._smcData = smc;
+
+  // ── Draw BOS lines ─────────────────────────
+  smc.bos.forEach(b => {
+    const color = b.dir === 'bull' ? 'rgba(0,230,118,0.7)' : 'rgba(255,61,87,0.7)';
+    const s = chart.addLineSeries({
+      color, lineWidth: 1, lineStyle: 1, // dashed
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    s.setData([
+      { time: b.time,      value: b.price },
+      { time: b.breakTime, value: b.price },
+    ]);
+    // Label line
+    const labelLine = candleSeries.createPriceLine({
+      price: b.price,
+      color,
+      lineWidth: 1,
+      lineStyle: 1,
+      axisLabelVisible: true,
+      title: b.label,
+    });
+    window._smcSeries.push(s);
+    window._smcPriceLines.push(labelLine);
+  });
+
+  // ── Draw CHoCH lines ───────────────────────
+  smc.choch.forEach(c => {
+    const color = c.dir === 'bull' ? 'rgba(179,136,255,0.8)' : 'rgba(255,201,71,0.8)';
+    const s = chart.addLineSeries({
+      color, lineWidth: 2, lineStyle: 0,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    s.setData([
+      { time: c.time,      value: c.price },
+      { time: c.breakTime, value: c.price },
+    ]);
+    const labelLine = candleSeries.createPriceLine({
+      price: c.price,
+      color,
+      lineWidth: 2,
+      lineStyle: 0,
+      axisLabelVisible: true,
+      title: c.label,
+    });
+    window._smcSeries.push(s);
+    window._smcPriceLines.push(labelLine);
+  });
+
+  // ── Draw FVG boxes ─────────────────────────
+  smc.fvg.forEach(f => {
+    const bullColor = 'rgba(0,230,118,0.12)';
+    const bearColor = 'rgba(255,61,87,0.12)';
+    const lineColor = f.dir === 'bull' ? 'rgba(0,230,118,0.4)' : 'rgba(255,61,87,0.4)';
+
+    // Top boundary
+    const sTop = chart.addLineSeries({
+      color: lineColor, lineWidth: 1, lineStyle: 2,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    sTop.setData([
+      { time: f.time,    value: f.top },
+      { time: f.endTime, value: f.top },
+    ]);
+
+    // Bottom boundary
+    const sBot = chart.addLineSeries({
+      color: lineColor, lineWidth: 1, lineStyle: 2,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    sBot.setData([
+      { time: f.time,    value: f.bottom },
+      { time: f.endTime, value: f.bottom },
+    ]);
+
+    // FVG label on price axis
+    const labelLine = candleSeries.createPriceLine({
+      price: (f.top + f.bottom) / 2,
+      color: lineColor,
+      lineWidth: 1,
+      lineStyle: 3,
+      axisLabelVisible: true,
+      title: f.label + ' ' + (f.size * 100).toFixed(2) + '%',
+    });
+
+    window._smcSeries.push(sTop, sBot);
+    window._smcPriceLines.push(labelLine);
+  });
+
+  // ── Draw swing structure labels ────────────
+  // Add HH/HL/LH/LL markers on the candleSeries
+  const allPoints = [
+    ...smc.highs.slice(-6).map(h => ({
+      time: h.time,
+      position: 'aboveBar',
+      shape: 'circle',
+      color: h.type === 'HH' ? '#00e676' : '#ff8a65',
+      text: h.type,
+      size: 0.4,
+    })),
+    ...smc.lows.slice(-6).map(l => ({
+      time: l.time,
+      position: 'belowBar',
+      shape: 'circle',
+      color: l.type === 'HL' ? '#00e676' : '#ff3d57',
+      text: l.type,
+      size: 0.4,
+    })),
+  ].sort((a, b) => a.time - b.time);
+
+  // Merge with existing signal markers
+  const existingMarkers = window._signalMarkers || [];
+  const merged = [...existingMarkers, ...allPoints].sort((a, b) => a.time - b.time);
+  try { candleSeries.setMarkers(merged); } catch(e) {}
+
+  // Update SMC info panel
+  updateSMCPanel(smc);
+}
+
+function clearSMC() {
+  if (!window._smcSeries) window._smcSeries = [];
+  if (!window._smcPriceLines) window._smcPriceLines = [];
+  window._smcSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
+  window._smcPriceLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} });
+  window._smcSeries = [];
+  window._smcPriceLines = [];
+}
+
+// ── SMC INFO PANEL (shows in chart overlay) ───
+function updateSMCPanel(smc) {
+  let el = document.getElementById('smcPanel');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'smcPanel';
+    el.style.cssText = `
+      position:absolute; bottom:12px; left:12px; z-index:20;
+      display:flex; gap:6px; flex-wrap:wrap; pointer-events:none;
+    `;
+    document.getElementById('mainChart').appendChild(el);
+  }
+
+  const trend = smc.trend;
+  const trendColor = trend === 'bull' ? '#00e676' : trend === 'bear' ? '#ff3d57' : '#ffc947';
+  const trendLabel = trend === 'bull' ? '▲ UPTREND' : trend === 'bear' ? '▼ DOWNTREND' : '◈ RANGING';
+
+  const hasBOS   = smc.bos.length > 0;
+  const hasCHoCH = smc.choch.length > 0;
+  const hasFVG   = smc.fvg.length > 0;
+
+  const badge = (label, color, bg) =>
+    `<div style="padding:3px 8px;border-radius:3px;font-size:9px;font-weight:700;letter-spacing:1px;
+     color:${color};background:${bg};border:1px solid ${color}40;">${label}</div>`;
+
+  el.innerHTML = [
+    badge(trendLabel, trendColor, trendColor + '12'),
+    hasBOS   ? badge('BOS DETECTED', smc.bos[0].dir === 'bull' ? '#00e676' : '#ff3d57', 'rgba(0,0,0,0.5)') : '',
+    hasCHoCH ? badge('CHoCH ⚡', smc.choch[0].dir === 'bull' ? '#b388ff' : '#ffc947', 'rgba(0,0,0,0.5)') : '',
+    hasFVG   ? badge(`${smc.fvg.length} FVG${smc.fvg.length > 1 ? 's' : ''}`, '#00d4ff', 'rgba(0,0,0,0.5)') : '',
+  ].join('');
+}
+
+// ── REAL-TIME SMC ALERT SYSTEM ────────────────
+let _lastSMCState = {};
+
+function checkSMCAlerts(cs, pair) {
+  const smc = window._smcData;
+  if (!smc) return;
+
+  const key = pair.id;
+  const prev = _lastSMCState[key] || {};
+
+  // Alert on new BOS
+  if (smc.bos.length > (prev.bosCount || 0)) {
+    const b = smc.bos[smc.bos.length - 1];
+    fireAlert(`🔨 BOS — ${pair.sym} · Break of Structure ${b.dir === 'bull' ? '▲' : '▼'}`, b.dir === 'bull' ? 'long' : 'short');
+    playTone(b.dir === 'bull' ? [440, 550, 660] : [660, 550, 440], 'triangle');
+  }
+
+  // Alert on new CHoCH
+  if (smc.choch.length > (prev.chochCount || 0)) {
+    const c = smc.choch[smc.choch.length - 1];
+    fireAlert(`⚡ CHoCH — ${pair.sym} · Change of Character ${c.dir === 'bull' ? '▲' : '▼'}`, 'entry');
+    playTone([523, 659, 784, 880], 'sine');
+  }
+
+  // Alert on new FVG
+  if (smc.fvg.length > (prev.fvgCount || 0)) {
+    const f = smc.fvg[smc.fvg.length - 1];
+    fireAlert(`📊 FVG — ${pair.sym} · ${(f.size * 100).toFixed(2)}% Liquidity Gap ${f.dir === 'bull' ? '▲' : '▼'}`, 'candle');
+  }
+
+  _lastSMCState[key] = {
+    bosCount:   smc.bos.length,
+    chochCount: smc.choch.length,
+    fvgCount:   smc.fvg.length,
+  };
 }
 
 // ── CANDLESTICK PATTERN DETECTOR ──────────────
@@ -3051,6 +3669,11 @@ async function bgScan() {
 // This hook is called from the existing WS onmessage when k.x (candle closed)
 function onCandleClosed(cs, pair) {
   runPatternScan(cs, pair);
+  // Update SMC structure on every closed candle
+  if (pair.id === activePair.id && showSMC) {
+    drawSMC(cs);
+    checkSMCAlerts(cs, pair);
+  }
 }
 
 // ═══════════════════════════════════════════════
