@@ -1033,7 +1033,7 @@ const RR_RATIO   = 2;    // default 1:2
 const ENTRY_TOL  = 0.002; // 0.2% entry zone
 const SCAN_INT   = 30000; // 30s active scan
 const BG_INT     = 90000; // 90s background scan
-const EXP_MINS   = 30;   // signal expiry
+const EXP_MINS   = 90;   // signal expiry — 90 mins gives pending signals more time to trigger
 
 // ═══════════════════════════════════════════════
 // STATE
@@ -3598,64 +3598,67 @@ async function runPatternScan(cs, pair) {
     if (htfBias === 'bull' && raw.dir === 'short') continue;
     if (htfBias === 'bear' && raw.dir === 'long')  continue;
 
-    // ── GATE 2: EMA stack ─────────────────────
+    // ── GATE 2: EMA stack — only hard-reject perfect counter ──
     const emaCheck = checkEMAStack(cs, raw.dir);
-    if (emaCheck.score <= -20) continue; // only reject on perfect counter-stack
+    if (emaCheck.score <= -20) continue;
 
-    // ── GATE 3: Candle confirmation ───────────
+    // ── CANDLE confirmation — bonus only, NO penalty gate ─────
     let candleName  = null;
-    let candleScore = -6;
+    let candleScore = 0; // neutral by default — not a penalty
     if (candle) {
       if (raw.dir === 'long'  && candle.dir === 'bull') { candleName = candle.name; candleScore = 10; }
       if (raw.dir === 'short' && candle.dir === 'bear') { candleName = candle.name; candleScore = 10; }
-      if (candle.dir === 'neutral') candleScore = -2;
+      if (candle.dir === 'neutral') candleScore = 2;  // doji = slight bonus (indecision at level)
+      // No negative — absence of candle doesn't punish, presence rewards
     }
-    const candleConfirmed = candleScore > 0;
+    const candleConfirmed = candleScore >= 10;
 
     // ── SCORING ENGINE ─────────────────────────
-    // Each filter is evaluated independently and tracked for agreement check
-    const macdScore  = checkMACDAlignment(cs, raw.dir);
-    const srScore    = checkSRProximity(cs, raw.entry, raw.dir);
-    const volScore   = calcVolumeScore(cs, raw.dir);
-    const mtfCheck   = await getMTFConfirmation(pair.id, raw.dir);
-    const rsiCheck   = detectRSIDivergence(cs, raw.dir);
+    const macdScore = checkMACDAlignment(cs, raw.dir);
+    const srScore   = checkSRProximity(cs, raw.entry, raw.dir);
+    const volScore  = calcVolumeScore(cs, raw.dir);
+    const mtfCheck  = await getMTFConfirmation(pair.id, raw.dir);
+    const rsiCheck  = detectRSIDivergence(cs, raw.dir);
 
-    // ── GATE 3B: Multi-factor agreement (3 of 5 must be positive) ──
-    // The 5 scoring filters: candle, EMA, MACD, MTF, RSI/volume
+    // ── GATE 3: Soft vote — 2 of 5 must be positive (down from 3) ──
     const factorVotes = [
-      candleScore  > 0,                          // 1. Candle confirmation
+      candleScore  >= 10,                        // 1. Candle confirmation
       emaCheck.score > 0,                        // 2. EMA alignment
       macdScore    > 0,                          // 3. MACD direction
       mtfCheck.score > 0,                        // 4. MTF (4H) agreement
-      rsiCheck.score > 0 || volScore > 0,        // 5. RSI or Volume (either counts)
+      rsiCheck.score > 0 || volScore > 0,        // 5. RSI or Volume
     ];
     const positiveVotes = factorVotes.filter(Boolean).length;
 
-    if (positiveVotes < 3) {
+    if (positiveVotes < 2) {
       console.log(`[APEX] SKIP ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | Only ${positiveVotes}/5 factors agree`);
       continue;
     }
 
     // ── CONFIDENCE SCORE ──────────────────────
-    let conf = raw.conf;
-    conf += candleScore;       // +10 / -6
-    conf += emaCheck.score;    // +15 / +8 / -5 / -20
-    conf += macdScore;         // +8 / -5
-    conf += srScore;           // +8
-    conf += volScore;          // +4 / -2
-    conf += mtfCheck.score;    // +10 / -10 / 0
-    conf += rsiCheck.score;    // +12 / +5 / -8 / 0
+    let conf = raw.conf;               // base: 72–85 from pattern
+    conf += candleScore;               // 0 / +2 / +10
+    conf += emaCheck.score;            // +15 / +8 / -5 (no -20 because we hard-rejected above)
+    conf += macdScore;                 // +8 / -5
+    conf += srScore;                   // 0–8
+    conf += volScore;                  // -2 to +4
+    conf += mtfCheck.score;            // +10 / -10 / 0
+    conf += rsiCheck.score;            // +12 / +5 / -8 / 0
     if (htfBias === 'neutral') conf += 3;
 
-    // Bonus: more factors agreeing = higher conviction
-    if (positiveVotes === 5) conf += 5;
-    else if (positiveVotes === 4) conf += 2;
+    // Conviction bonus
+    if (positiveVotes === 5) conf += 6;
+    else if (positiveVotes === 4) conf += 3;
+    else if (positiveVotes === 3) conf += 1;
 
     conf = Math.min(Math.round(conf), 99);
 
-    // ── GATE 4: 80% minimum ───────────────────
-    if (conf < 80) {
-      console.log(`[APEX] SKIP ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | ${conf}% < 80% | ${positiveVotes}/5 factors | ${emaCheck.label} · ${mtfCheck.label}`);
+    // ── GATE 4: Lowered to 68% minimum ───────
+    // Below 68% = genuinely low quality, skip
+    // 68–79% = acceptable, fire with lower confidence label
+    // 80%+ = high quality
+    if (conf < 68) {
+      console.log(`[APEX] SKIP ${raw.dir.toUpperCase()} ${pair.sym} ${raw.pattern} | ${conf}% < 68% | ${positiveVotes}/5 | ${emaCheck.label}`);
       continue;
     }
 
@@ -3684,9 +3687,11 @@ async function runPatternScan(cs, pair) {
 
     const key = `${pair.sym}_${raw.dir}_${raw.pattern.replace(/\s/g,'')}_${Math.floor(Date.now()/3600000)}`;
 
-    // Dedup
+    // Dedup: block same pattern+direction only (allow different pattern same direction)
     const alreadyActive = Object.values(signals).some(s =>
-      s.pairId === pair.id && s.dir === raw.dir &&
+      s.pairId === pair.id &&
+      s.dir === raw.dir &&
+      s.pattern === raw.pattern &&
       !['expired','sl_hit','tp3_hit'].includes(s.status)
     );
     if (alreadyActive || signals[key]) continue;
@@ -3815,8 +3820,8 @@ async function init() {
   bgPriceUpdate();
 
   // Background pattern scanner — rotates through all pairs every 2 minutes
-  setInterval(bgScan, 12000); // scan one pair every 12s → full rotation ~2min
-  setTimeout(bgScan, 3000);   // first scan after 3s
+  setInterval(bgScan, 8000); // scan one pair every 8s → full rotation ~80s
+  setTimeout(bgScan, 2000);  // first scan after 2s
 
   // Initial scan on active pair immediately after load
   setTimeout(() => {
