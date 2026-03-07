@@ -723,7 +723,114 @@ html, body {
 }
 .api-btn:hover { opacity: 0.85; }
 
-/* ── ALERT BANNER ── */
+/* ── POSITION TOOL ── */
+.pos-tool-panel {
+  position: absolute;
+  top: 12px; right: 12px;
+  z-index: 30;
+  width: 210px;
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 12px;
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.pos-tool-panel.visible { display: flex; }
+.pos-tool-title {
+  font-size: 9px; font-weight: 700; letter-spacing: 2px;
+  color: var(--accent); margin-bottom: 2px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.pos-tool-close {
+  cursor: pointer; color: var(--muted); font-size: 12px;
+  background: none; border: none; padding: 0; line-height: 1;
+}
+.pos-tool-close:hover { color: var(--red); }
+.pos-tool-row {
+  display: flex; flex-direction: column; gap: 3px;
+}
+.pos-tool-lbl {
+  font-size: 8px; letter-spacing: 1px; color: var(--muted);
+}
+.pos-tool-input {
+  background: var(--bg);
+  border: 1px solid var(--border2);
+  border-radius: 3px;
+  padding: 5px 8px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  width: 100%;
+  transition: border-color 0.15s;
+}
+.pos-tool-input:focus { outline: none; border-color: var(--accent); }
+.pos-tool-input.entry { border-color: rgba(255,201,71,0.4); }
+.pos-tool-input.sl    { border-color: rgba(255,61,87,0.4); }
+.pos-tool-input.tp    { border-color: rgba(0,230,118,0.4); }
+.pos-tool-dir {
+  display: flex; gap: 6px;
+}
+.pos-dir-btn {
+  flex: 1; padding: 5px; border-radius: 3px; border: 1px solid var(--border2);
+  background: transparent; color: var(--muted);
+  font-family: 'JetBrains Mono', monospace; font-size: 9px;
+  font-weight: 700; letter-spacing: 1px; cursor: pointer;
+  transition: all 0.15s;
+}
+.pos-dir-btn.long.active  { background: rgba(0,230,118,0.15); border-color: var(--green); color: var(--green); }
+.pos-dir-btn.short.active { background: rgba(255,61,87,0.15);  border-color: var(--red);   color: var(--red); }
+.pos-tool-rr {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+.pos-rr-item { text-align: center; }
+.pos-rr-lbl { font-size: 7px; letter-spacing: 1px; color: var(--muted); margin-bottom: 2px; }
+.pos-rr-val { font-size: 11px; font-weight: 700; }
+.pos-rr-val.pos { color: var(--green); }
+.pos-rr-val.neg { color: var(--red); }
+.pos-rr-val.gold { color: var(--gold); }
+.pos-tool-actions { display: flex; gap: 6px; }
+.pos-action-btn {
+  flex: 1; padding: 6px; border-radius: 3px; border: none;
+  font-family: 'JetBrains Mono', monospace; font-size: 8px;
+  font-weight: 700; letter-spacing: 1px; cursor: pointer;
+  transition: opacity 0.15s;
+}
+.pos-action-btn:hover { opacity: 0.8; }
+.pos-action-btn.draw  { background: var(--accent); color: var(--bg); }
+.pos-action-btn.clear { background: var(--border2); color: var(--text2); }
+.pos-click-hint {
+  font-size: 8px; color: var(--muted); text-align: center;
+  letter-spacing: 0.5px; line-height: 1.5;
+  padding: 4px; border: 1px dashed var(--border); border-radius: 3px;
+}
+
+/* Flash cursor when pos tool active */
+#mainChart.pos-tool-active { cursor: crosshair !important; }
+
+/* Floating position label on chart */
+.pos-chart-label {
+  position: absolute;
+  pointer-events: none;
+  z-index: 25;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+
+
 .alert-banner {
   position: fixed;
   top: 58px;
@@ -842,6 +949,7 @@ html, body {
       <button class="ind-btn macd"    data-ind="macd">MACD</button>
       <button class="ch-btn" id="chBtn">⟋ CHANNEL</button>
       <button class="ch-btn" id="smcBtn">◈ SMC</button>
+      <button class="ch-btn" id="posToolBtn">⊞ TRADE PLANNER</button>
       <div id="candleCountdown" style="
         margin-left:auto;padding:4px 10px;border-radius:3px;
         border:1px solid var(--border2);background:var(--bg2);
@@ -909,6 +1017,65 @@ html, body {
           <div class="loader-inner">
             <div class="loader-ring"></div>
             <div class="loader-txt">LOADING MARKET DATA</div>
+          </div>
+        </div>
+
+        <!-- POSITION / TRADE PLANNER TOOL -->
+        <div class="pos-tool-panel" id="posToolPanel">
+          <div class="pos-tool-title">
+            ⊞ TRADE PLANNER
+            <button class="pos-tool-close" id="posToolCloseBtn">✕</button>
+          </div>
+
+          <div class="pos-tool-dir">
+            <button class="pos-dir-btn long active" id="posDirLong">▲ LONG</button>
+            <button class="pos-dir-btn short" id="posDirShort">▼ SHORT</button>
+          </div>
+
+          <div class="pos-tool-row">
+            <div class="pos-tool-lbl">ENTRY PRICE</div>
+            <input class="pos-tool-input entry" id="posEntry" type="number" placeholder="0.00" step="any">
+          </div>
+          <div class="pos-tool-row">
+            <div class="pos-tool-lbl">STOP LOSS</div>
+            <input class="pos-tool-input sl" id="posSL" type="number" placeholder="0.00" step="any">
+          </div>
+          <div class="pos-tool-row">
+            <div class="pos-tool-lbl">TAKE PROFIT 1</div>
+            <input class="pos-tool-input tp" id="posTP1" type="number" placeholder="0.00" step="any">
+          </div>
+          <div class="pos-tool-row">
+            <div class="pos-tool-lbl">TAKE PROFIT 2 <span style="color:var(--muted2)">(optional)</span></div>
+            <input class="pos-tool-input tp" id="posTP2" type="number" placeholder="0.00" step="any">
+          </div>
+
+          <!-- Live R:R readout -->
+          <div class="pos-tool-rr" id="posRRPanel">
+            <div class="pos-rr-item">
+              <div class="pos-rr-lbl">RISK %</div>
+              <div class="pos-rr-val neg" id="posRiskPct">—</div>
+            </div>
+            <div class="pos-rr-item">
+              <div class="pos-rr-lbl">R:R RATIO</div>
+              <div class="pos-rr-val gold" id="posRRVal">—</div>
+            </div>
+            <div class="pos-rr-item">
+              <div class="pos-rr-lbl">REWARD %</div>
+              <div class="pos-rr-val pos" id="posRewardPct">—</div>
+            </div>
+            <div class="pos-rr-item">
+              <div class="pos-rr-lbl">TP2 R:R</div>
+              <div class="pos-rr-val gold" id="posRR2Val">—</div>
+            </div>
+          </div>
+
+          <div class="pos-click-hint" id="posClickHint">
+            Click on chart to set entry price
+          </div>
+
+          <div class="pos-tool-actions">
+            <button class="pos-action-btn draw" id="posDrawBtn">DRAW ON CHART</button>
+            <button class="pos-action-btn clear" id="posClearBtn">CLEAR</button>
           </div>
         </div>
       </div>
@@ -2485,6 +2652,7 @@ async function switchPair(p) {
   if (window._srLines) { window._srLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} }); window._srLines = []; }
   if (window._obSeries) { window._obSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} }); window._obSeries = []; }
   clearSMC();
+  clearPosTool();
   // Remove SMC panel
   const smcPanel = document.getElementById('smcPanel');
   if (smcPanel) smcPanel.remove();
@@ -2573,6 +2741,318 @@ document.getElementById('smcBtn').addEventListener('click', () => {
     if (smcPanel) smcPanel.remove();
   }
 });
+
+// ═══════════════════════════════════════════════
+// TRADE PLANNER / POSITION TOOL
+// ═══════════════════════════════════════════════
+
+let posToolActive   = false;
+let posToolDir      = 'long';
+let posToolSeries   = [];   // chart series drawn by position tool
+let posToolLines    = [];   // price lines drawn by position tool
+let posClickMode    = null; // 'entry' | 'sl' | 'tp1' | 'tp2' | null
+
+// ── Open / Close panel ────────────────────────
+document.getElementById('posToolBtn').addEventListener('click', () => {
+  posToolActive = !posToolActive;
+  document.getElementById('posToolBtn').classList.toggle('on', posToolActive);
+  document.getElementById('posToolPanel').classList.toggle('visible', posToolActive);
+  document.getElementById('mainChart').classList.toggle('pos-tool-active', posToolActive);
+  if (posToolActive) autoFillEntry();
+});
+
+document.getElementById('posToolCloseBtn').addEventListener('click', () => {
+  posToolActive = false;
+  document.getElementById('posToolBtn').classList.remove('on');
+  document.getElementById('posToolPanel').classList.remove('visible');
+  document.getElementById('mainChart').classList.remove('pos-tool-active');
+  posClickMode = null;
+});
+
+// ── Direction toggle ──────────────────────────
+document.getElementById('posDirLong').addEventListener('click', () => {
+  posToolDir = 'long';
+  document.getElementById('posDirLong').classList.add('active');
+  document.getElementById('posDirShort').classList.remove('active');
+  autoFillEntry();
+  calcPosRR();
+});
+document.getElementById('posDirShort').addEventListener('click', () => {
+  posToolDir = 'short';
+  document.getElementById('posDirShort').classList.add('active');
+  document.getElementById('posDirLong').classList.remove('active');
+  autoFillEntry();
+  calcPosRR();
+});
+
+// ── Auto-fill entry with current price ────────
+function autoFillEntry() {
+  const price = candles.length ? candles[candles.length - 1].close : 0;
+  if (!price) return;
+  const dec = activePair.dec;
+  const entryEl = document.getElementById('posEntry');
+  if (!entryEl.value) entryEl.value = price.toFixed(dec);
+  // Auto-suggest SL and TP if empty
+  suggestLevels(price);
+}
+
+function suggestLevels(price) {
+  const dec   = activePair.dec;
+  const slEl  = document.getElementById('posSL');
+  const tp1El = document.getElementById('posTP1');
+  const tp2El = document.getElementById('posTP2');
+
+  // Default 2% SL, 4% TP1 (1:2 R:R), 6% TP2 (1:3 R:R)
+  if (!slEl.value) {
+    slEl.value  = posToolDir === 'long'
+      ? (price * 0.98).toFixed(dec)
+      : (price * 1.02).toFixed(dec);
+  }
+  if (!tp1El.value) {
+    tp1El.value = posToolDir === 'long'
+      ? (price * 1.04).toFixed(dec)
+      : (price * 0.96).toFixed(dec);
+  }
+  if (!tp2El.value) {
+    tp2El.value = posToolDir === 'long'
+      ? (price * 1.06).toFixed(dec)
+      : (price * 0.94).toFixed(dec);
+  }
+  calcPosRR();
+}
+
+// ── Live R:R calculation ──────────────────────
+function calcPosRR() {
+  const entry = parseFloat(document.getElementById('posEntry').value);
+  const sl    = parseFloat(document.getElementById('posSL').value);
+  const tp1   = parseFloat(document.getElementById('posTP1').value);
+  const tp2   = parseFloat(document.getElementById('posTP2').value);
+
+  if (!entry || !sl || !tp1) {
+    document.getElementById('posRiskPct').textContent   = '—';
+    document.getElementById('posRRVal').textContent     = '—';
+    document.getElementById('posRewardPct').textContent = '—';
+    document.getElementById('posRR2Val').textContent    = '—';
+    return;
+  }
+
+  const riskPx   = Math.abs(entry - sl);
+  const rewardPx = Math.abs(tp1 - entry);
+  const riskPct  = (riskPx / entry * 100).toFixed(2);
+  const rewardPct= (rewardPx / entry * 100).toFixed(2);
+  const rr       = riskPx > 0 ? (rewardPx / riskPx).toFixed(2) : '—';
+
+  document.getElementById('posRiskPct').textContent   = riskPct + '%';
+  document.getElementById('posRRVal').textContent     = rr + 'R';
+  document.getElementById('posRewardPct').textContent = rewardPct + '%';
+
+  if (tp2 && !isNaN(tp2)) {
+    const reward2Px = Math.abs(tp2 - entry);
+    const rr2 = riskPx > 0 ? (reward2Px / riskPx).toFixed(2) : '—';
+    document.getElementById('posRR2Val').textContent = rr2 + 'R';
+  } else {
+    document.getElementById('posRR2Val').textContent = '—';
+  }
+}
+
+// Live recalc on any input change
+['posEntry','posSL','posTP1','posTP2'].forEach(id => {
+  document.getElementById(id).addEventListener('input', calcPosRR);
+});
+
+// ── Chart click to set price levels ──────────
+document.getElementById('mainChart').addEventListener('click', (e) => {
+  if (!posToolActive || !chart) return;
+
+  // Convert pixel Y to price using chart coordinate system
+  const rect  = e.currentTarget.getBoundingClientRect();
+  const y     = e.clientY - rect.top;
+  const price = candleSeries.coordinateToPrice(y);
+  if (!price || price <= 0) return;
+
+  const dec = activePair.dec;
+  const hint = document.getElementById('posClickHint');
+
+  // Cycle: entry → sl → tp1 → tp2 → draw
+  if (!posClickMode || posClickMode === 'tp2done') posClickMode = 'entry';
+
+  if (posClickMode === 'entry') {
+    document.getElementById('posEntry').value = price.toFixed(dec);
+    posClickMode = 'sl';
+    hint.textContent = 'Click to set Stop Loss';
+    hint.style.color = 'var(--red)';
+  } else if (posClickMode === 'sl') {
+    document.getElementById('posSL').value = price.toFixed(dec);
+    posClickMode = 'tp1';
+    hint.textContent = 'Click to set Take Profit 1';
+    hint.style.color = 'var(--green)';
+  } else if (posClickMode === 'tp1') {
+    document.getElementById('posTP1').value = price.toFixed(dec);
+    posClickMode = 'tp2';
+    hint.textContent = 'Click for TP2 (or press DRAW)';
+    hint.style.color = 'var(--gold)';
+  } else if (posClickMode === 'tp2') {
+    document.getElementById('posTP2').value = price.toFixed(dec);
+    posClickMode = 'tp2done';
+    hint.textContent = 'Press DRAW ON CHART';
+    hint.style.color = 'var(--accent)';
+    drawPositionTool(); // auto-draw after all 4 levels set
+    return;
+  }
+
+  calcPosRR();
+  drawPositionTool(); // redraw live as each level is set
+});
+
+// ── Draw button ───────────────────────────────
+document.getElementById('posDrawBtn').addEventListener('click', drawPositionTool);
+document.getElementById('posClearBtn').addEventListener('click', clearPositionTool);
+
+// ── CORE DRAW FUNCTION ────────────────────────
+function drawPositionTool() {
+  clearPositionTool(false); // clear old drawing, keep inputs
+
+  const entry = parseFloat(document.getElementById('posEntry').value);
+  const sl    = parseFloat(document.getElementById('posSL').value);
+  const tp1   = parseFloat(document.getElementById('posTP1').value);
+  const tp2   = parseFloat(document.getElementById('posTP2').value);
+
+  if (!entry || !sl) return;
+
+  const cs     = candles;
+  if (!cs.length) return;
+
+  const now    = cs[cs.length - 1].time;
+  const start  = cs[Math.max(0, cs.length - 5)].time; // start 5 candles back
+  const tfSecs = TF_SECONDS[activeTF] || 3600;
+  const end    = now + tfSecs * 20; // extend 20 candles into future
+
+  const isLong   = posToolDir === 'long';
+  const entryCol = '#ffc947';
+  const slCol    = 'rgba(255,61,87,0.85)';
+  const slFill   = 'rgba(255,61,87,0.12)';
+  const tp1Col   = 'rgba(0,230,118,0.85)';
+  const tp1Fill  = 'rgba(0,230,118,0.12)';
+  const tp2Col   = 'rgba(0,212,255,0.85)';
+  const tp2Fill  = 'rgba(0,212,255,0.08)';
+
+  // ── Helper: draw a filled zone ────────────
+  function drawZone(topPrice, botPrice, lineColor, fillColor, label) {
+    // Top line
+    const sTop = chart.addLineSeries({ color: lineColor, lineWidth: 1, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sTop.setData([{ time: start, value: topPrice }, { time: end, value: topPrice }]);
+
+    // Bottom line
+    const sBot = chart.addLineSeries({ color: lineColor, lineWidth: 1, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sBot.setData([{ time: start, value: botPrice }, { time: end, value: botPrice }]);
+
+    // Fill (thick mid line)
+    const midPrice = (topPrice + botPrice) / 2;
+    const thickness = Math.max(2, Math.round(Math.abs(topPrice - botPrice) / topPrice * 10000));
+    const sFill = chart.addLineSeries({ color: fillColor, lineWidth: Math.min(thickness, 50), lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+    sFill.setData([{ time: start, value: midPrice }, { time: end, value: midPrice }]);
+
+    // Price axis label
+    const pl = candleSeries.createPriceLine({ price: topPrice, color: lineColor, lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: label });
+
+    posToolSeries.push(sTop, sBot, sFill);
+    posToolLines.push(pl);
+    return { sTop, sBot, sFill };
+  }
+
+  // ── ENTRY LINE ────────────────────────────
+  const entryLine = chart.addLineSeries({ color: entryCol, lineWidth: 2, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
+  entryLine.setData([{ time: start, value: entry }, { time: end, value: entry }]);
+  const entryPL = candleSeries.createPriceLine({ price: entry, color: entryCol, lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: '⚡ ENTRY' });
+  posToolSeries.push(entryLine);
+  posToolLines.push(entryPL);
+
+  // ── SL ZONE ───────────────────────────────
+  const slTop = isLong ? entry  : Math.max(sl, entry + Math.abs(entry - sl));
+  const slBot = isLong ? sl     : entry;
+  drawZone(slTop, slBot, slCol, slFill, `🛑 SL ${sl.toFixed(activePair.dec)}`);
+
+  // ── TP1 ZONE ──────────────────────────────
+  if (tp1) {
+    const tp1Top = isLong ? tp1   : entry;
+    const tp1Bot = isLong ? entry : tp1;
+
+    // If TP2 exists, TP1 zone only goes up to TP2 bottom
+    const tp1ZoneTop = (tp2 && isLong)  ? tp2 : tp1Top;
+    const tp1ZoneBot = (tp2 && !isLong) ? tp2 : tp1Bot;
+
+    const rr1 = sl ? (Math.abs(tp1 - entry) / Math.abs(entry - sl)).toFixed(1) : '';
+    drawZone(
+      isLong ? (tp2 || tp1) : entry,
+      isLong ? entry : (tp2 || tp1),
+      tp1Col, tp1Fill,
+      `🎯 TP1 ${tp1.toFixed(activePair.dec)} · ${rr1}R`
+    );
+  }
+
+  // ── TP2 ZONE (extension beyond TP1) ──────
+  if (tp2 && tp1) {
+    const rr2 = sl ? (Math.abs(tp2 - entry) / Math.abs(entry - sl)).toFixed(1) : '';
+    // TP2 zone is narrower stripe beyond TP1
+    const tp2Top = isLong ? tp2 + Math.abs(tp2 - tp1) * 0.3 : tp1;
+    const tp2Bot = isLong ? tp2                              : tp2 - Math.abs(tp2 - tp1) * 0.3;
+    drawZone(
+      isLong ? tp2Top : tp1,
+      isLong ? tp2    : tp2Bot,
+      tp2Col, tp2Fill,
+      `🚀 TP2 ${tp2.toFixed(activePair.dec)} · ${rr2}R`
+    );
+  }
+
+  // ── R:R summary label on entry line ──────
+  const rr = sl && tp1 ? (Math.abs(tp1 - entry) / Math.abs(entry - sl)).toFixed(2) : null;
+  if (rr) {
+    const summaryLine = candleSeries.createPriceLine({
+      price: entry,
+      color: 'transparent',
+      lineWidth: 0,
+      axisLabelVisible: false,
+      title: '',
+    });
+    posToolLines.push(summaryLine);
+  }
+
+  // Reset click hint
+  document.getElementById('posClickHint').textContent = 'Click chart to adjust levels';
+  document.getElementById('posClickHint').style.color = 'var(--muted)';
+}
+
+// ── Clear drawing ─────────────────────────────
+function clearPositionTool(clearInputs = true) {
+  posToolSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
+  posToolLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} });
+  posToolSeries = [];
+  posToolLines  = [];
+
+  if (clearInputs) {
+    ['posEntry','posSL','posTP1','posTP2'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+    document.getElementById('posRiskPct').textContent   = '—';
+    document.getElementById('posRRVal').textContent     = '—';
+    document.getElementById('posRewardPct').textContent = '—';
+    document.getElementById('posRR2Val').textContent    = '—';
+    posClickMode = null;
+    const hint = document.getElementById('posClickHint');
+    hint.textContent = 'Click on chart to set entry price';
+    hint.style.color = 'var(--muted)';
+  }
+}
+
+// Clear position tool on pair switch
+const _origSwitchPair = switchPair;
+// Hook into pair switch — clear pos tool drawing
+function clearPosTool() {
+  posToolSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
+  posToolLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} });
+  posToolSeries = [];
+  posToolLines  = [];
+}
 
 // ── CANDLE COUNTDOWN TIMER ────────────────────
 const TF_SECONDS = { '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
