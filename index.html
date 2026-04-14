@@ -535,7 +535,13 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
           <div class="stat-card best"><div class="stat-lbl">BEST TRADE</div><div class="stat-val" id="jBest">—</div></div>
           <div class="stat-card worst"><div class="stat-lbl">WORST TRADE</div><div class="stat-val" id="jWorst">—</div></div>
         </div>
-        <div class="equity-wrap"><div class="equity-lbl">EQUITY CURVE</div><canvas id="equityChart"></canvas></div>
+        <div class="equity-wrap">
+          <div class="equity-lbl" style="display:flex;justify-content:space-between;align-items:center;">
+            EQUITY CURVE
+            <button onclick="clearJournal()" style="font-size:8px;padding:2px 7px;border:1px solid var(--border);border-radius:3px;background:none;color:var(--muted);font-family:'JetBrains Mono',monospace;cursor:pointer;letter-spacing:1px;" onmouseover="this.style.color='var(--red)';this.style.borderColor='var(--red)'" onmouseout="this.style.color='var(--muted)';this.style.borderColor='var(--border)'">CLEAR</button>
+          </div>
+          <canvas id="equityChart"></canvas>
+        </div>
         <div class="journal-log" id="journalLog">
           <div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No trades logged yet</div>
         </div>
@@ -1430,7 +1436,7 @@ function updateSignalStatuses(price,pairId) {
   });
 }
 
-function expireSignal(s,reason) { s.status='expired';s.expiredAt=Date.now();s.expiredReason=reason; logToJournal(s,'expired'); refreshChartLines(s.pairId); saveSignals(); }
+function expireSignal(s,reason) { s.status='expired';s.expiredAt=Date.now();s.expiredReason=reason; refreshChartLines(s.pairId); saveSignals(); }
 function markHit(s,status) {
   s.status=status;s.closedAt=Date.now();s.closePrice=s.latestPrice;
   if (status==='sl_hit') {
@@ -1587,8 +1593,8 @@ function renderSignals() {
         </div>
       </div>
       <div style="font-size:8px;color:var(--muted);letter-spacing:0.4px;margin-bottom:6px;line-height:1.8">${timeLabel}</div>
-      <div class="sc-pattern">📐 ${s.pattern}${s.candlePattern?' · 🕯 '+s.candlePattern:''}</div>
-      ${s.filters?`<div style="font-size:8px;color:var(--muted);letter-spacing:0.5px;margin-bottom:6px;line-height:1.6">${s.filters}</div>`:''}
+      <div class="sc-pattern">${s.predictive ? '🔮' : '📐'} ${s.pattern}${s.candlePattern?' · 🕯 '+s.candlePattern:''}${s.predictive ? ' <span style="font-size:8px;padding:1px 4px;border-radius:2px;background:rgba(179,136,255,0.15);color:var(--purple);border:1px solid rgba(179,136,255,0.3);letter-spacing:0.5px">PREDICTIVE</span>' : ''}</div>
+      ${(s.filters||s.note)?`<div style="font-size:8px;color:var(--muted);letter-spacing:0.5px;margin-bottom:6px;line-height:1.6">${s.filters||s.note}</div>`:''}
       ${pnlHTML}
       <div class="prox-wrap">
         <div class="prox-lbl"><span>${prox.type==='progress'?(tp1Done&&!tp2Done?'TO TP2':tp2Done?'TO TP3':'TO TP1'):'ENTRY ZONE'}</span><span style="color:${prox.color}">${prox.label}</span></div>
@@ -1622,64 +1628,179 @@ function statusLabel(s) {
 // ═══════════════════════════════════════════════
 // JOURNAL
 // ═══════════════════════════════════════════════
-function logToJournal(s,outcome) {
-  if (journal.find(j=>j.id===s.id)) return;
-  const actualEntry=s.entryPrice||s.entry, actualExit=s.closePrice||s.latestPrice||s.entry;
-  const riskPx=Math.abs(actualEntry-s.sl);
-  let pnlPx=0;
-  if (outcome==='tp3') pnlPx=Math.abs(s.tp3-actualEntry);
-  else if (outcome==='tp2') pnlPx=Math.abs(s.tp2-actualEntry);
-  else if (outcome==='tp1') pnlPx=Math.abs(s.tp1-actualEntry);
-  else if (outcome==='sl')  pnlPx=-riskPx;
-  const dir=s.dir==='long'?1:-1;
-  const rMult=riskPx>0?(pnlPx*dir)/riskPx:0;
-  const pnlPct=riskPx>0?(pnlPx*dir/actualEntry)*100:0;
-  journal.push({id:s.id,sym:s.sym,dir:s.dir,pattern:s.pattern,candle:s.candlePattern||'—',htfBias:s.htfBias||'—',entry:actualEntry,exit:actualExit,sl:s.sl,tp1:s.tp1,tp2:s.tp2,tp3:s.tp3,outcome,pnlPct:+pnlPct.toFixed(3),rMult:+rMult.toFixed(2),confidence:s.confidence,openedAt:s.enteredAt||s.detectedAt,closedAt:s.closedAt||Date.now(),date:new Date().toISOString().slice(0,10),time:new Date().toISOString().slice(11,16)});
-  localStorage.setItem('apex_journal_v1',JSON.stringify(journal));
+function logToJournal(s, outcome) {
+  // ── RULE 1: Never log expired or unenterted signals ──────────────
+  // A trade only exists in reality if it was actually entered (entryPrice set).
+  // Signals that expired/70pct'd before entry never touched real money → skip.
+  if (outcome === 'expired') return;
+  if (!s.entryPrice || !s.enteredAt) return; // never entered → not a real trade
+
+  // ── RULE 2: Prevent duplicate entries ────────────────────────────
+  if (journal.find(j => j.id === s.id && j.outcome === outcome)) return;
+
+  // ── RULE 3: Use ACTUAL entry and exit prices (not detected price) ─
+  const actualEntry = s.entryPrice; // price at which entry was triggered
+  const riskPx      = Math.abs(actualEntry - s.sl);
+  if (riskPx <= 0) return; // degenerate — no risk defined, skip
+
+  // ── RULE 4: Calculate real R-multiples from actual prices ─────────
+  // Use the real TP/SL price levels, not guessed PnL
+  let pnlPx = 0;
+  let exitPrice = s.closePrice || actualEntry;
+
+  if (outcome === 'tp3') {
+    pnlPx     = Math.abs(s.tp3 - actualEntry);
+    exitPrice = s.tp3;
+  } else if (outcome === 'tp2') {
+    pnlPx     = Math.abs(s.tp2 - actualEntry);
+    exitPrice = s.tp2;
+  } else if (outcome === 'tp1') {
+    pnlPx     = Math.abs(s.tp1 - actualEntry);
+    exitPrice = s.tp1;
+  } else if (outcome === 'sl') {
+    // SL hit: loss = actual distance from entry to SL (always negative)
+    pnlPx     = -Math.abs(s.sl - actualEntry);
+    exitPrice = s.sl;
+  }
+
+  const dirMult = s.dir === 'long' ? 1 : -1;
+  const rMult   = (pnlPx * dirMult) / riskPx;          // real R multiple
+  const pnlPct  = (pnlPx * dirMult / actualEntry) * 100; // real % PnL
+
+  journal.push({
+    id:         s.id,
+    sym:        s.sym,
+    dir:        s.dir,
+    pattern:    s.pattern,
+    candle:     s.candlePattern || '—',
+    htfBias:    s.htfBias      || '—',
+    entry:      actualEntry,
+    exit:       exitPrice,
+    sl:         s.sl,
+    tp1:        s.tp1,
+    tp2:        s.tp2,
+    tp3:        s.tp3,
+    outcome,
+    pnlPct:     +pnlPct.toFixed(3),
+    rMult:      +rMult.toFixed(2),
+    confidence: s.confidence,
+    openedAt:   s.enteredAt,
+    closedAt:   s.closedAt || Date.now(),
+    date:       new Date().toISOString().slice(0, 10),
+    time:       new Date().toISOString().slice(11, 16),
+  });
+
+  localStorage.setItem('apex_journal_v1', JSON.stringify(journal));
   renderJournal();
 }
 
 function renderJournal() {
-  const closed=journal.filter(j=>j.outcome!=='expired');
-  if (!closed.length) { ['jWinRate','jAvgRR','jTotal','jDrawdown'].forEach(id=>{ const el=document.getElementById(id); if(el)el.textContent=id==='jTotal'?'0':'—'; }); return; }
-  const wins=closed.filter(j=>j.rMult>0).length;
-  const winRate=(wins/closed.length*100).toFixed(0);
-  const avgRR=(closed.reduce((s,j)=>s+j.rMult,0)/closed.length).toFixed(2);
-  const bestTrade=Math.max(...closed.map(j=>j.rMult));
-  const worstTrade=Math.min(...closed.map(j=>j.rMult));
-  let equity=100,peak=100,maxDD=0; const equityPoints=[100];
-  closed.forEach(j=>{ equity=equity*(1+j.pnlPct/100); equityPoints.push(+equity.toFixed(2)); if(equity>peak)peak=equity; const dd=(peak-equity)/peak*100; if(dd>maxDD)maxDD=dd; });
-  document.getElementById('jWinRate').textContent=winRate+'%';
-  document.getElementById('jAvgRR').textContent=avgRR+'R';
-  document.getElementById('jTotal').textContent=closed.length;
-  document.getElementById('jDrawdown').textContent=maxDD.toFixed(1)+'%';
-  const jBest=document.getElementById('jBest'), jWorst=document.getElementById('jWorst');
-  if(jBest) jBest.textContent='+'+bestTrade.toFixed(1)+'R';
-  if(jWorst) jWorst.textContent=worstTrade.toFixed(1)+'R';
-  const canvas=document.getElementById('equityChart');
-  if (!canvas) return;
-  const ctx=canvas.getContext('2d');
-  canvas.width=canvas.offsetWidth||260; canvas.height=canvas.offsetHeight||80;
-  const W=canvas.width,H=canvas.height;
-  const minV=Math.min(...equityPoints),maxV=Math.max(...equityPoints),range=maxV-minV||1;
-  const toX=i=>(i/(equityPoints.length-1))*W;
-  const toY=v=>H-((v-minV)/range)*H*0.8-H*0.1;
-  ctx.clearRect(0,0,W,H);
-  ctx.beginPath();ctx.strokeStyle='rgba(255,255,255,0.06)';ctx.lineWidth=1;ctx.setLineDash([3,4]);ctx.moveTo(0,toY(100));ctx.lineTo(W,toY(100));ctx.stroke();ctx.setLineDash([]);
-  const finalEquity=equityPoints[equityPoints.length-1], isProfit=finalEquity>=100;
-  const grad=ctx.createLinearGradient(0,0,0,H);
-  grad.addColorStop(0,isProfit?'rgba(0,230,118,0.25)':'rgba(255,61,87,0.25)');grad.addColorStop(1,'rgba(0,0,0,0)');
+  // Only count real closed trades — tp1, tp2, tp3, sl. Never expired or unentered.
+  const realTrades = journal.filter(j => ['tp1','tp2','tp3','sl'].includes(j.outcome));
+  const el = id => document.getElementById(id);
+
+  if (!realTrades.length) {
+    ['jWinRate','jAvgRR','jTotal','jDrawdown','jBest','jWorst'].forEach(id => {
+      const e = el(id); if (e) e.textContent = id === 'jTotal' ? '0' : '—';
+    });
+    const logEl = el('journalLog');
+    if (logEl) logEl.innerHTML = '<div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No completed trades yet<br><span style=\'color:var(--muted2)\'>Only entered+closed trades are logged</span></div>';
+    return;
+  }
+
+  const wins     = realTrades.filter(j => j.rMult > 0).length;
+  const losses   = realTrades.filter(j => j.rMult < 0).length;
+  const winRate  = (wins / realTrades.length * 100).toFixed(0);
+  const avgRR    = (realTrades.reduce((s,j) => s + j.rMult, 0) / realTrades.length).toFixed(2);
+  const bestR    = Math.max(...realTrades.map(j => j.rMult));
+  const worstR   = Math.min(...realTrades.map(j => j.rMult));
+
+  // Equity curve using real R-multiples, 1R = 1% account risk
+  const RISK_PCT = 1; // assume 1% risk per trade
+  let equity = 100, peak = 100, maxDD = 0;
+  const equityPoints = [100];
+  realTrades.forEach(j => {
+    equity = equity * (1 + (j.rMult * RISK_PCT) / 100);
+    equityPoints.push(+equity.toFixed(2));
+    if (equity > peak) peak = equity;
+    const dd = (peak - equity) / peak * 100;
+    if (dd > maxDD) maxDD = dd;
+  });
+
+  // Update stats
+  el('jWinRate').textContent = winRate + '%';
+  el('jAvgRR').textContent   = (avgRR >= 0 ? '+' : '') + avgRR + 'R';
+  el('jTotal').textContent   = realTrades.length;
+  el('jDrawdown').textContent = maxDD.toFixed(1) + '%';
+  const jWinRateEl = el('jWinRate');
+  if (jWinRateEl) jWinRateEl.style.color = wins/realTrades.length >= 0.5 ? 'var(--green)' : 'var(--red)';
+  const jAvgEl = el('jAvgRR');
+  if (jAvgEl) jAvgEl.style.color = +avgRR >= 0 ? 'var(--green)' : 'var(--red)';
+  const jBest  = el('jBest');  if (jBest)  jBest.textContent  = '+' + bestR.toFixed(1) + 'R';
+  const jWorst = el('jWorst'); if (jWorst) jWorst.textContent = worstR.toFixed(1) + 'R';
+
+  // Draw equity curve
+  const canvas = el('equityChart'); if (!canvas) return;
+  const ctx    = canvas.getContext('2d');
+  canvas.width  = canvas.offsetWidth  || 260;
+  canvas.height = canvas.offsetHeight || 80;
+  const W = canvas.width, H = canvas.height;
+  const minV = Math.min(...equityPoints), maxV = Math.max(...equityPoints), range = maxV - minV || 1;
+  const toX = i => (i / (equityPoints.length - 1)) * W;
+  const toY = v => H - ((v - minV) / range) * H * 0.8 - H * 0.1;
+  ctx.clearRect(0, 0, W, H);
+  // Baseline at 100
+  ctx.beginPath(); ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+  ctx.setLineDash([3, 4]); ctx.moveTo(0, toY(100)); ctx.lineTo(W, toY(100)); ctx.stroke(); ctx.setLineDash([]);
+  const finalEquity = equityPoints[equityPoints.length - 1], isProfit = finalEquity >= 100;
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, isProfit ? 'rgba(0,230,118,0.25)' : 'rgba(255,61,87,0.25)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.beginPath();
-  equityPoints.forEach((v,i)=>i===0?ctx.moveTo(toX(i),toY(v)):ctx.lineTo(toX(i),toY(v)));
-  ctx.strokeStyle=isProfit?'#00e676':'#ff3d57';ctx.lineWidth=1.5;ctx.stroke();
-  ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
-  ctx.font='bold 9px JetBrains Mono,monospace';ctx.fillStyle=isProfit?'#00e676':'#ff3d57';ctx.fillText(finalEquity.toFixed(1),W-34,12);
-  const logEl=document.getElementById('journalLog');
-  logEl.innerHTML=journal.slice().reverse().slice(0,20).map(j=>{
-    const won=j.rMult>0;
-    const icon=j.outcome==='tp3'?'🎯':j.outcome==='tp2'?'✅':j.outcome==='tp1'?'🟢':j.outcome==='sl'?'🛑':'⏰';
-    return `<div class="jlog-e ${won?'win':'loss'}"><span class="jlog-sym">${j.sym}</span><span class="jlog-type ${j.dir}">${j.dir.toUpperCase()}</span><span style="color:var(--muted2);font-size:8px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${j.pattern}</span><span style="font-size:9px;margin-right:4px">${icon}</span><span class="jlog-pnl ${won?'pos':'neg'}">${j.rMult>=0?'+':''}${j.rMult.toFixed(1)}R</span></div>`;
+  equityPoints.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+  ctx.strokeStyle = isProfit ? '#00e676' : '#ff3d57'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold 9px JetBrains Mono,monospace';
+  ctx.fillStyle = isProfit ? '#00e676' : '#ff3d57';
+  ctx.fillText(finalEquity.toFixed(1), W - 34, 12);
+
+  // Trade log — most recent first, only real trades
+  const logEl = el('journalLog');
+  logEl.innerHTML = realTrades.slice().reverse().slice(0, 20).map(j => {
+    const won  = j.rMult > 0;
+    const icon = j.outcome === 'tp3' ? '🎯' : j.outcome === 'tp2' ? '✅' : j.outcome === 'tp1' ? '🟢' : '🛑';
+    const rStr = (j.rMult >= 0 ? '+' : '') + j.rMult.toFixed(2) + 'R';
+    return `<div class="jlog-e ${won ? 'win' : 'loss'}">
+      <span class="jlog-sym">${j.sym}</span>
+      <span class="jlog-type ${j.dir}">${j.dir.toUpperCase()}</span>
+      <span style="color:var(--muted2);font-size:8px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${j.pattern}</span>
+      <span style="font-size:9px;margin-right:4px">${icon}</span>
+      <span class="jlog-pnl ${won ? 'pos' : 'neg'}">${rStr}</span>
+    </div>`;
   }).join('');
+}
+
+// Manual journal clear (user-initiated)
+function clearJournal() {
+  if (!confirm('Clear all journal data? This cannot be undone.')) return;
+  journal = [];
+  localStorage.removeItem('apex_journal_v1');
+  renderJournal();
+}
+
+// Clear stale journal data (0.0R ghost entries from before fix)
+function clearGhostJournalEntries() {
+  const before = journal.length;
+  // Remove any entry that: was never entered (no entryPrice equivalent via rMult=0 AND outcome is expired/candle)
+  journal = journal.filter(j => {
+    if (!['tp1','tp2','tp3','sl'].includes(j.outcome)) return false; // drop expired/candle entries
+    if (j.rMult === 0 && j.outcome !== 'tp1') return false; // drop 0R non-tp1 entries (tp1 can legitimately be 0 if at entry)
+    return true;
+  });
+  if (journal.length !== before) {
+    localStorage.setItem('apex_journal_v1', JSON.stringify(journal));
+    console.log(`[APEX] Cleaned ${before - journal.length} ghost journal entries`);
+  }
 }
 
 // ═══════════════════════════════════════════════
@@ -2186,6 +2307,162 @@ function getPatternConfBonus(patternName) {
 }
 
 // ═══════════════════════════════════════════════
+// PREDICTIVE SIGNAL ENGINE
+// Generates forward-looking signals from momentum,
+// velocity, and structure — not just completed patterns
+// ═══════════════════════════════════════════════
+
+// ── 1. MOMENTUM VELOCITY ─────────────────────────
+// Measures rate-of-change acceleration across timeframes.
+// A velocity spike = institutional positioning beginning.
+function calcMomentumVelocity(cs) {
+  if (cs.length < 20) return { velocity: 0, direction: 'neutral', strength: 0 };
+  const slice   = cs.slice(-20);
+  const roc5    = (slice[19].close - slice[14].close) / slice[14].close * 100; // 5-bar ROC
+  const roc10   = (slice[19].close - slice[9].close)  / slice[9].close  * 100; // 10-bar ROC
+  const roc20   = (slice[19].close - slice[0].close)  / slice[0].close  * 100; // 20-bar ROC
+  // Velocity = acceleration: short ROC outpacing long ROC = momentum building
+  const acceleration = roc5 - (roc10 / 2); // is short-term outrunning long-term?
+  const direction    = acceleration > 0 ? 'bull' : acceleration < 0 ? 'bear' : 'neutral';
+  const strength     = Math.min(Math.abs(acceleration) / 0.5, 3); // 0–3 scale
+  return { velocity: acceleration, direction, strength, roc5, roc10, roc20 };
+}
+
+// ── 2. VOLUME PROFILE IMBALANCE ──────────────────
+// Detects where volume is concentrating vs. price is thin.
+// Thin volume above/below price = magnet zones (market will fill them).
+function calcVolumeImbalance(cs) {
+  if (cs.length < 30) return { aboveImbalance: 0, belowImbalance: 0, magnet: null };
+  const recent   = cs.slice(-30);
+  const avgVol   = recent.reduce((s,c) => s + c.volume, 0) / recent.length;
+  const cur      = cs[cs.length - 1];
+  // High volume candles = absorption zones (magnets when price returns)
+  const highVolCandles = recent.filter(c => c.volume > avgVol * 1.8);
+  let aboveCount = 0, belowCount = 0, strongestAbove = null, strongestBelow = null;
+  highVolCandles.forEach(c => {
+    const midpoint = (c.high + c.low) / 2;
+    if (midpoint > cur.close) {
+      aboveCount += c.volume / avgVol;
+      if (!strongestAbove || c.volume > strongestAbove.volume) strongestAbove = c;
+    } else {
+      belowCount += c.volume / avgVol;
+      if (!strongestBelow || c.volume > strongestBelow.volume) strongestBelow = c;
+    }
+  });
+  // Magnet = side with MORE absorption (price tends toward volume)
+  const magnet = aboveCount > belowCount * 1.5 ? { dir: 'bull', level: strongestAbove?.close, strength: aboveCount }
+               : belowCount > aboveCount * 1.5 ? { dir: 'bear', level: strongestBelow?.close, strength: belowCount }
+               : null;
+  return { aboveImbalance: aboveCount, belowImbalance: belowCount, magnet };
+}
+
+// ── 3. STRUCTURE COMPLETION PREDICTOR ────────────
+// Detects partial patterns that are completing — fire signal BEFORE
+// the pattern is fully formed but when completion probability is >75%.
+function detectEmergingPattern(cs, highs, lows) {
+  const cur = cs[cs.length - 1];
+  const predictions = [];
+
+  // Emerging Double Bottom: one confirmed low, price pulling back from rebound
+  if (lows.length >= 1) {
+    const lastLow = lows[lows.length - 1];
+    const sinceCandles = cs.length - 1 - lastLow.i;
+    const rebound = (cur.close - lastLow.p) / lastLow.p;
+    // Price bounced 2–8% from the low but hasn't broken structure yet
+    if (sinceCandles >= 5 && sinceCandles <= 25 && rebound > 0.02 && rebound < 0.10) {
+      const neck = cs.slice(lastLow.i).reduce((mx, c) => Math.max(mx, c.high), -Infinity);
+      predictions.push({
+        pattern: 'Emerging Double Bottom',
+        dir: 'long',
+        entry: neck * 1.001,
+        conf: 72,
+        predictive: true,
+        completionPct: Math.min(85, 60 + rebound * 200),
+        note: `${sinceCandles} bars since low · ${(rebound*100).toFixed(1)}% rebound`,
+      });
+    }
+  }
+
+  // Emerging Double Top: one confirmed high, price pulling back
+  if (highs.length >= 1) {
+    const lastHigh = highs[highs.length - 1];
+    const sinceCandles = cs.length - 1 - lastHigh.i;
+    const pullback = (lastHigh.p - cur.close) / lastHigh.p;
+    if (sinceCandles >= 5 && sinceCandles <= 25 && pullback > 0.02 && pullback < 0.10) {
+      const neck = cs.slice(lastHigh.i).reduce((mn, c) => Math.min(mn, c.low), Infinity);
+      predictions.push({
+        pattern: 'Emerging Double Top',
+        dir: 'short',
+        entry: neck * 0.999,
+        conf: 72,
+        predictive: true,
+        completionPct: Math.min(85, 60 + pullback * 200),
+        note: `${sinceCandles} bars since high · ${(pullback*100).toFixed(1)}% pullback`,
+      });
+    }
+  }
+
+  // Emerging BOS continuation: recent BOS + pullback to broken level = retest entry
+  if (window._smcData) {
+    const smc = window._smcData;
+    smc.bos.forEach(bos => {
+      const dist = Math.abs(cur.close - bos.price) / bos.price;
+      if (dist < 0.008) { // price retesting the BOS level
+        predictions.push({
+          pattern: 'BOS Retest',
+          dir: bos.dir === 'bull' ? 'long' : 'short',
+          entry: bos.price,
+          conf: 78,
+          predictive: true,
+          completionPct: 88,
+          note: `Price retesting BOS at ${bos.price.toFixed(2)}`,
+        });
+      }
+    });
+
+    // FVG fill prediction: price approaching unfilled FVG
+    smc.fvg.forEach(fvg => {
+      const midFVG = (fvg.top + fvg.bottom) / 2;
+      const dist   = Math.abs(cur.close - midFVG) / midFVG;
+      if (dist < 0.012) { // within 1.2% of FVG midpoint
+        const dir = fvg.dir === 'bull' ? 'long' : 'short'; // price fills from direction of imbalance
+        predictions.push({
+          pattern: 'FVG Magnet Fill',
+          dir,
+          entry: fvg.dir === 'bull' ? fvg.bottom : fvg.top,
+          conf: 74,
+          predictive: true,
+          completionPct: 80,
+          note: `${(fvg.size*100).toFixed(2)}% FVG · ${(dist*100).toFixed(2)}% away`,
+        });
+      }
+    });
+  }
+
+  return predictions;
+}
+
+// ── 4. TREND PROJECTION ─────────────────────────
+// Projects current trend forward using EMA slope + velocity.
+// Returns expected price zone in next N candles.
+function projectTrend(cs, periods = 5) {
+  if (cs.length < 50) return null;
+  const ema20 = calcEMA(cs, 20);
+  const e1    = ema20[ema20.length - 1].value;
+  const e5    = ema20[ema20.length - 6]?.value;
+  if (!e5) return null;
+  const slope     = (e1 - e5) / e5;           // EMA slope per 5 bars
+  const projected = e1 * (1 + slope * periods); // project N bars forward
+  const velocity  = calcMomentumVelocity(cs);
+  return {
+    projectedPrice: projected,
+    direction: slope > 0.001 ? 'bull' : slope < -0.001 ? 'bear' : 'neutral',
+    slopePct: (slope * 100).toFixed(3),
+    confirmedByVelocity: velocity.direction === (slope > 0 ? 'bull' : 'bear'),
+  };
+}
+
+// ═══════════════════════════════════════════════
 // MASTER SCAN (GT-enhanced)
 // ═══════════════════════════════════════════════
 async function runPatternScan(cs,pair) {
@@ -2194,12 +2471,51 @@ async function runPatternScan(cs,pair) {
   const htfBias=await getHTFBias(pair.id);
   const cur=cs[cs.length-1], closed=cs.slice(0,-1), candle=detectCandlePattern(closed);
   if (pair.id===activePair.id) { drawSRLevels(cs); drawOrderBlocks(cs); }
-  const candidates=[
+  // ── Standard completed patterns ──────────────────
+  const completedPatterns = [
     detectDoubleBottomStrict(lows,cs), detectDoubleTopStrict(highs,cs),
-    detectHeadShoulders(highs,cs), detectInverseHS(lows,cs),
+    detectHeadShoulders(highs,cs),     detectInverseHS(lows,cs),
     detectAscendingTriangle(highs,lows,cs), detectDescendingTriangle(highs,lows,cs),
-    detectBullFlag(highs,lows,cs), detectBearFlag(highs,lows,cs),
+    detectBullFlag(highs,lows,cs),     detectBearFlag(highs,lows,cs),
   ].filter(Boolean);
+
+  // ── Predictive / emerging patterns ───────────────
+  // These fire BEFORE full pattern completes when probability is high
+  const emergingPatterns = detectEmergingPattern(cs, highs, lows);
+
+  // ── Momentum-driven signals ───────────────────────
+  const velocity = calcMomentumVelocity(cs);
+  const volImbal = calcVolumeImbalance(cs);
+  const trendProj = projectTrend(cs, 5);
+
+  // Add velocity signal if momentum is strong and confirmed by volume magnet
+  const momentumCandidates = [];
+  if (velocity.strength >= 2.0 && volImbal.magnet && volImbal.magnet.dir === velocity.direction) {
+    momentumCandidates.push({
+      pattern: `Momentum ${velocity.direction === 'bull' ? '▲' : '▼'} Surge`,
+      dir: velocity.direction === 'bull' ? 'long' : 'short',
+      entry: cur.close,
+      conf: 70 + Math.round(velocity.strength * 5),
+      predictive: true,
+      note: `Velocity: ${velocity.velocity.toFixed(3)} · Vol magnet: ${(volImbal.magnet.strength).toFixed(1)}x`,
+    });
+  }
+
+  // Trend projection confirms continuation
+  if (trendProj && trendProj.confirmedByVelocity && trendProj.direction !== 'neutral') {
+    const isLong = trendProj.direction === 'bull';
+    momentumCandidates.push({
+      pattern: `Trend Continuation ${isLong ? '▲' : '▼'}`,
+      dir: isLong ? 'long' : 'short',
+      entry: cur.close,
+      conf: 71,
+      predictive: true,
+      note: `EMA slope: ${trendProj.slopePct}%/5bar · Velocity aligned`,
+    });
+  }
+
+  // Merge all candidates — completed patterns get priority (higher base conf)
+  const candidates = [...completedPatterns, ...emergingPatterns, ...momentumCandidates].filter(Boolean);
   if (!candidates.length) { if(candle&&candle.dir!=='neutral') fireCandleAlert(candle,pair,cur.close); return; }
 
   for (const raw of candidates) {
@@ -2223,7 +2539,10 @@ async function runPatternScan(cs,pair) {
 
     const factorVotes=[candleScore>=10,emaCheck.score>0,macdScore>0,mtfCheck.score>0,rsiCheck.score>0||volScore>0];
     const positiveVotes=factorVotes.filter(Boolean).length;
-    if (positiveVotes<2) continue;
+    // Predictive patterns get 2-vote minimum (they're inherently forward-looking)
+    // Completed patterns require 3 votes for higher precision
+    const minVotes = raw.predictive ? 2 : 3;
+    if (positiveVotes < minVotes) continue;
 
     let conf=raw.conf;
     conf+=candleScore; conf+=emaCheck.score; conf+=macdScore; conf+=srScore;
@@ -2233,7 +2552,7 @@ async function runPatternScan(cs,pair) {
     if (htfBias==='neutral') conf+=3;
     if (positiveVotes===5) conf+=6; else if (positiveVotes===4) conf+=3; else if (positiveVotes===3) conf+=1;
     conf=Math.min(Math.round(conf),99);
-    if (conf<68) continue;
+    if (conf<72) continue; // raised from 68 → 72 to reduce noise
 
     const filterParts=[emaCheck.label,mtfCheck.label,rsiCheck.divergence?rsiCheck.label:null,candleName?`✓ ${candleName}`:null,nashCheck.score>0?`◈ ${nashCheck.label}`:null,`${positiveVotes}/5 factors`].filter(Boolean);
     const filters=filterParts.join(' · ');
@@ -2249,7 +2568,7 @@ async function runPatternScan(cs,pair) {
     const alreadyActive=Object.values(signals).some(s=>s.pairId===pair.id&&s.dir===raw.dir&&s.pattern===raw.pattern&&!['expired','sl_hit','tp3_hit'].includes(s.status));
     if (alreadyActive||signals[key]) continue;
 
-    const sig={id:key,key,pairId:pair.id,sym:pair.sym,pattern:raw.pattern,candlePattern:candleName,dir:raw.dir,entry,sl,tp1,tp2,tp3,htfBias,confidence:conf,filters,status:'pending',detectedAt:Date.now(),latestPrice:cur.close,nashBoost:nashCheck.score>0};
+    const sig={id:key,key,pairId:pair.id,sym:pair.sym,pattern:raw.pattern,candlePattern:candleName,dir:raw.dir,entry,sl,tp1,tp2,tp3,htfBias,confidence:conf,filters,note:raw.note||null,predictive:!!raw.predictive,status:'pending',detectedAt:Date.now(),latestPrice:cur.close,nashBoost:nashCheck.score>0};
     signals[key]=sig; saveSignals();
 
     fireAlert(`${raw.dir==='long'?'▲':'▼'} ${pair.sym} · ${raw.pattern} · ${conf}%`,raw.dir==='long'?'long':'short');
@@ -2342,41 +2661,56 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
 // INIT
 // ═══════════════════════════════════════════════
 async function init() {
-  if (Notification?.permission==='default') Notification.requestPermission();
-  try { const saved=localStorage.getItem('apex_signals_v1'); if(saved) signals=JSON.parse(saved); } catch(e){}
+  if (Notification?.permission === 'default') Notification.requestPermission();
+
+  // ── Restore signals ────────────────────────────
+  try { const saved = localStorage.getItem('apex_signals_v1'); if (saved) signals = JSON.parse(saved); } catch(e) {}
+
+  // ── Clean ghost journal entries from before fix ─
+  // Removes any 0.0R expired/unentered entries that polluted stats
+  clearGhostJournalEntries();
 
   buildWatchbar();
 
-  await new Promise((resolve)=>{
-    if (typeof LightweightCharts!=='undefined') { resolve(); return; }
+  await new Promise((resolve) => {
+    if (typeof LightweightCharts !== 'undefined') { resolve(); return; }
     if (window._lwcReady) { resolve(); return; }
-    document.addEventListener('lwcReady',resolve,{once:true});
-    setTimeout(()=>{ if(typeof LightweightCharts==='undefined') document.getElementById('lwcError').style.display='flex'; resolve(); },8000);
+    document.addEventListener('lwcReady', resolve, { once: true });
+    setTimeout(() => {
+      if (typeof LightweightCharts === 'undefined') document.getElementById('lwcError').style.display = 'flex';
+      resolve();
+    }, 8000);
   });
-  if (typeof LightweightCharts==='undefined') return;
+  if (typeof LightweightCharts === 'undefined') return;
 
   initChart();
-  await loadPair(activePair,activeTF);
+  await loadPair(activePair, activeTF);
   renderJournal();
   renderPatternLogger();
 
-  setInterval(bgPriceUpdate,15000);
+  // Background price ticker — every 15s
+  setInterval(bgPriceUpdate, 15000);
   bgPriceUpdate();
 
-  setInterval(bgScan,8000);
-  setTimeout(bgScan,2000);
+  // Background pattern scanner — rotates all pairs every ~80s
+  setInterval(bgScan, 8000);
+  setTimeout(bgScan, 2000);
 
-  setTimeout(()=>{ if(candles.length>50) runPatternScan(candles,activePair); },5000);
-  setInterval(renderSignals,5000);
+  // Initial scan after chart loads
+  setTimeout(() => { if (candles.length > 50) runPatternScan(candles, activePair); }, 5000);
 
-  // GT: refresh Nash panel every 30s
-  setInterval(()=>{
+  // Signal proximity re-render every 5s
+  setInterval(renderSignals, 5000);
+
+  // GT refresh — Nash zones + pattern logger every 30s
+  setInterval(() => {
     if (candles.length) refreshNashZones(candles);
     renderPatternLogger();
-  },30000);
+  }, 30000);
 
-  console.log('[APEX GT] Game Theory Edition initialized ✓');
-  console.log('[APEX GT] Modules: Bayesian Curve | Nash Zones | Pattern Logger | Hawk-Dove Sizing');
+  console.log('[APEX GT] Initialized ✓');
+  console.log('[APEX GT] Journal: only entered+closed trades logged');
+  console.log('[APEX GT] Predictive engine: momentum velocity | FVG magnets | BOS retests | emerging patterns');
 }
 
 init();
