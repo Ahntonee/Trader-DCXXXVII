@@ -52,6 +52,12 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .ch-btn{display:flex;align-items:center;gap:5px;padding:3px 9px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:9px;cursor:pointer;transition:all 0.15s;}
 .ch-btn.on{border-color:rgba(179,136,255,0.5);color:var(--purple);}
 .clock{font-size:11px;color:var(--text2);letter-spacing:1px;white-space:nowrap;}
+.session-bar{display:flex;align-items:center;gap:5px;margin-right:10px;}
+.sess-pill{display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:12px;font-size:9px;font-weight:700;letter-spacing:0.8px;border:1px solid;transition:all 0.4s;white-space:nowrap;}
+.sess-pill.active{border-color:rgba(0,230,118,0.4);background:rgba(0,230,118,0.08);color:var(--green);}
+.sess-pill.inactive{border-color:var(--border);background:transparent;color:var(--muted);opacity:0.45;}
+.sess-pill .sdot{width:5px;height:5px;border-radius:50%;background:currentColor;}
+.sess-overlap{font-size:8px;font-weight:700;letter-spacing:1px;color:var(--gold);padding:2px 7px;border-radius:10px;border:1px solid rgba(255,201,71,0.35);background:rgba(255,201,71,0.07);white-space:nowrap;animation:pulse 1.4s infinite;}
 .watchbar{display:flex;flex-wrap:wrap;align-items:center;padding:5px 8px;gap:4px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
 .pair-btn{position:relative;display:flex;align-items:center;gap:5px;padding:3px 8px;border:1px solid var(--border2);border-radius:4px;background:transparent;color:var(--text2);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;cursor:pointer;transition:all 0.2s;white-space:nowrap;letter-spacing:0.3px;flex-shrink:0;}
 .pair-btn:hover{border-color:var(--accent);color:var(--accent);}
@@ -289,6 +295,13 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       </div>
     </div>
   </div>
+  <div class="session-bar" id="sessionBar">
+    <div class="sess-pill inactive" id="sess-Sydney"><span class="sdot"></span>SYD</div>
+    <div class="sess-pill inactive" id="sess-Tokyo"><span class="sdot"></span>TYO</div>
+    <div class="sess-pill inactive" id="sess-London"><span class="sdot"></span>LON</div>
+    <div class="sess-pill inactive" id="sess-New York"><span class="sdot"></span>NYC</div>
+    <div class="sess-overlap" id="sessOverlap" style="display:none;">⚡ OVERLAP</div>
+  </div>
   <div class="clock" id="clock">--:--:-- UTC</div>
 </div>
 
@@ -510,6 +523,9 @@ function handleServerMessage(msg) {
     case 'summary_init':
       signalSummary = msg.data||{};
       renderJournal();
+      break;
+    case 'sessions':
+      updateSessionBar(msg.active||[], msg.bonus||{});
       break;
     case 'stats_init':
       patternStats = msg.data||[];
@@ -1164,6 +1180,35 @@ function updateCandleCountdown() { const el=document.getElementById('candleCount
 setInterval(updateCandleCountdown,1000); updateCandleCountdown();
 function tick() { document.getElementById('clock').textContent=new Date().toISOString().slice(11,19)+' UTC'; }
 setInterval(tick,1000); tick();
+
+// ── Session bar ──────────────────────────────────────────────────
+const SESSION_IDS = ['Sydney','Tokyo','London','New York'];
+function updateSessionBar(active, bonus) {
+  const activeSet = new Set(active);
+  SESSION_IDS.forEach(name => {
+    const el = document.getElementById('sess-'+name);
+    if (!el) return;
+    const on = activeSet.has(name);
+    el.className = 'sess-pill ' + (on ? 'active' : 'inactive');
+  });
+  // Overlap badge — show during London-NY overlap (both active) or when bonus is high
+  const overlap = activeSet.has('London') && activeSet.has('New York');
+  const ov = document.getElementById('sessOverlap');
+  if (ov) {
+    ov.style.display = overlap ? 'block' : 'none';
+    ov.textContent   = overlap ? '⚡ LON-NY' : '';
+  }
+}
+// Initialise from server on first load (fallback: compute client-side)
+(function initSessions() {
+  const h = new Date().getUTCHours();
+  const active = [];
+  if (h >= 22 || h < 7)  active.push('Sydney');
+  if (h >= 0  && h < 9)  active.push('Tokyo');
+  if (h >= 7  && h < 16) active.push('London');
+  if (h >= 13 && h < 22) active.push('New York');
+  updateSessionBar(active, {});
+})();
 
 // ═══════════════════════════════════════════════════════════════
 // EVENT BINDINGS

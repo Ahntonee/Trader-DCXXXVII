@@ -229,6 +229,15 @@ function broadcast(msg) {
   wss.clients.forEach(ws => { if (ws.readyState === 1) ws.send(str); });
 }
 
+function broadcastSessions() {
+  broadcast({
+    type:    'sessions',
+    active:  engine.getMarketSessions(),
+    bonus:   engine.getSessionBonus(),
+    utcHour: new Date().getUTCHours(),
+  });
+}
+
 wss.on('connection', ws => {
   // Send current active signals on connect
   try {
@@ -241,6 +250,11 @@ wss.on('connection', ws => {
     const btResults = db.getBacktestResults.all();
     if (btResults.length) ws.send(JSON.stringify({ type: 'backtest_results', data: btResults }));
     ws.send(JSON.stringify({ type: 'summary_init', data: db.getSignalSummary.get() }));
+    // Send current session state immediately on connect
+    ws.send(JSON.stringify({
+      type: 'sessions', active: engine.getMarketSessions(),
+      bonus: engine.getSessionBonus(), utcHour: new Date().getUTCHours(),
+    }));
   } catch (e) { console.warn('WS init error:', e.message); }
 });
 
@@ -631,6 +645,14 @@ app.get('/api/instruments', (req, res) => {
   res.json({ crypto: CRYPTO_PAIRS, forex: FOREX_PAIRS });
 });
 
+app.get('/api/sessions', (req, res) => {
+  res.json({
+    active:  engine.getMarketSessions(),
+    bonus:   engine.getSessionBonus(),
+    utcHour: new Date().getUTCHours(),
+  });
+});
+
 // Trigger a full backtest run (can take several minutes)
 let _backtestRunning = false;
 let _backtestLastRun = 0;
@@ -713,6 +735,7 @@ async function start() {
   setInterval(scanForexSignals,  5 * 60 * 1000); // scan one forex pair every 5min
   setInterval(updateCryptoPrices, 15 * 1000);    // price refresh every 15s
   setInterval(updateForexPrices,  60 * 1000);    // forex prices every 60s
+  setInterval(broadcastSessions,  60 * 1000);    // session update every minute
 
   // Initial scans on startup
   setTimeout(scanCryptoSignals, 3000);

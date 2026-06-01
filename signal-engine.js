@@ -482,6 +482,53 @@ function getHistoricalBonus(pattern, tf, assetClass) {
   return { bonus: 0, winRate: entry.winRate, suppressed: false };
 }
 
+// ─── MARKET SESSION AWARENESS ───────────────────────────────────────
+// Crypto trades 24/7 but institutional volume clusters around FX sessions.
+// Signals fired during high-liquidity windows have higher follow-through.
+//
+// All times UTC:
+//   Sydney    22:00 – 07:00
+//   Tokyo     00:00 – 09:00
+//   London    07:00 – 16:00
+//   New York  13:00 – 22:00
+//
+// Overlaps (best moments):
+//   London–NY  13:00 – 16:00  ← highest crypto volume globally
+//   Tokyo–Lon  07:00 – 09:00  ← moderate
+//
+// Dead zones (lowest volume, most fakeouts):
+//   Post-NY / pre-Sydney  22:00 – 00:00
+//   Deep Asia             02:00 – 07:00
+
+function getMarketSessions() {
+  const h = new Date().getUTCHours();
+  const sessions = [];
+  if (h >= 22 || h < 7)  sessions.push('Sydney');
+  if (h >= 0  && h < 9)  sessions.push('Tokyo');
+  if (h >= 7  && h < 16) sessions.push('London');
+  if (h >= 13 && h < 22) sessions.push('New York');
+  return sessions;
+}
+
+function getSessionBonus() {
+  const h = new Date().getUTCHours();
+  // London–NY overlap: peak liquidity → strongest signals
+  if (h >= 13 && h < 16) return { bonus: 5,  label: '⚡ LON-NY OVERLAP' };
+  // London open: strong momentum
+  if (h >= 7  && h < 9)  return { bonus: 3,  label: '🇬🇧 LON OPEN' };
+  // NY open: high volatility breakouts
+  if (h >= 13 && h < 15) return { bonus: 3,  label: '🗽 NY OPEN' };
+  // Active London session (non-open)
+  if (h >= 9  && h < 13) return { bonus: 1,  label: null };
+  // Active NY session (post-open)
+  if (h >= 15 && h < 18) return { bonus: 1,  label: null };
+  // Tokyo session: lower crypto volume, still ok
+  if (h >= 0  && h < 7)  return { bonus: 0,  label: null };
+  // Post-NY wind-down (18:00–22:00 UTC): volume fading
+  if (h >= 18 && h < 22) return { bonus: -2, label: '🌙 LOW VOL' };
+  return { bonus: 0, label: null };
+}
+
 // ─── MASTER SIGNAL SCAN ─────────────────────────────────────────────
 
 async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
@@ -559,6 +606,7 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     if (histBonus.suppressed) continue; // pattern has poor historical win rate
 
     // Build confidence score
+    const sessionBonus = getSessionBonus();
     let conf = raw.conf;
     conf += emaCheck.score;
     conf += macdScore;
@@ -568,6 +616,7 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     conf += htfCheck.score;
     conf += candleScore;
     conf += histBonus.bonus;
+    conf += sessionBonus.bonus;           // session liquidity modifier
     if (positiveVotes === 5) conf += 5;
     else if (positiveVotes === 4) conf += 2;
     conf = Math.min(Math.round(conf), 96);
@@ -606,6 +655,7 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       volCheck.label,
       `${positiveVotes}/5 factors`,
       histBonus.winRate != null ? `Hist WR: ${Math.round(histBonus.winRate * 100)}%` : null,
+      sessionBonus.label,               // e.g. "⚡ LON-NY OVERLAP"
     ].filter(Boolean).join(' · ');
 
     const expiresAt = Date.now() + (EXPIRY_MINS[tf] || 360) * 60 * 1000;
@@ -711,4 +761,4 @@ function updateSignalOnPrice(sig, price) {
   return null;
 }
 
-module.exports = { scanPair, updateSignalOnPrice, setPatternWinRates, computeRMult, calcADX, calcATR, calcEMA, calcRSI, calcMACD, findSwings, calcSR };
+module.exports = { scanPair, updateSignalOnPrice, setPatternWinRates, computeRMult, calcADX, calcATR, calcEMA, calcRSI, calcMACD, findSwings, calcSR, getMarketSessions, getSessionBonus };
