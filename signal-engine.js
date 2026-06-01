@@ -154,7 +154,9 @@ function detectDoubleBottom(lows, cs) {
   const neck = Math.max(...neckSlice.map(c => c.high));
   if ((neck - l2.p) / l2.p < 0.005) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close < neck) return null; // must have broken neckline
+  // Pre-breakout: fire while price is approaching neckline (within 3%).
+  // The overshoot filter in scanPair handles price being too far above.
+  if (cur.close < neck * 0.97) return null;
   return { pattern: 'Double Bottom', dir: 'long', entry: neck, swingLow: Math.min(l1.p, l2.p), conf: 75 };
 }
 
@@ -168,7 +170,7 @@ function detectDoubleTop(highs, cs) {
   const neck = Math.min(...neckSlice.map(c => c.low));
   if ((h2.p - neck) / h2.p < 0.005) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close > neck) return null; // must have broken neckline
+  if (cur.close > neck * 1.03) return null; // too far above — breakdown not imminent
   return { pattern: 'Double Top', dir: 'short', entry: neck, swingHigh: Math.max(h1.p, h2.p), conf: 75 };
 }
 
@@ -183,7 +185,7 @@ function detectHeadShoulders(highs, cs) {
   const neckR = cs.slice(h.i, rh.i).reduce((mn, c) => Math.min(mn, c.low), Infinity);
   const neck = (neckL + neckR) / 2;
   const cur = cs[cs.length - 1];
-  if (cur.close > neck) return null; // needs neckline break
+  if (cur.close > neck * 1.03) return null; // too far above — breakdown not imminent
   return { pattern: 'Head & Shoulders', dir: 'short', entry: neck, swingHigh: h.p, conf: 82 };
 }
 
@@ -197,7 +199,7 @@ function detectInverseHS(lows, cs) {
   const neckR = cs.slice(h.i, rh.i).reduce((mx, c) => Math.max(mx, c.high), -Infinity);
   const neck = (neckL + neckR) / 2;
   const cur = cs[cs.length - 1];
-  if (cur.close < neck) return null; // needs neckline break
+  if (cur.close < neck * 0.97) return null; // too far below — breakout not imminent
   return { pattern: 'Inv. Head & Shoulders', dir: 'long', entry: neck, swingLow: h.p, conf: 82 };
 }
 
@@ -207,7 +209,7 @@ function detectAscendingTriangle(highs, lows, cs) {
   if (!rH.every(h => Math.abs(h.p - rH[0].p) / rH[0].p < 0.007)) return null;
   if (!(rL[0].p < rL[1].p && rL[1].p < rL[2].p)) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close < rH[0].p * 0.998) return null; // needs breakout
+  if (cur.close < rH[0].p * 0.97) return null; // too far below resistance — breakout not imminent
   return { pattern: 'Ascending Triangle', dir: 'long', entry: rH[0].p * 1.001, resist: rH[0].p, conf: 72 };
 }
 
@@ -217,7 +219,7 @@ function detectDescendingTriangle(highs, lows, cs) {
   if (!rL.every(l => Math.abs(l.p - rL[0].p) / rL[0].p < 0.007)) return null;
   if (!(rH[0].p > rH[1].p && rH[1].p > rH[2].p)) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close > rL[0].p * 1.002) return null; // needs breakdown
+  if (cur.close > rL[0].p * 1.03) return null; // too far above support — breakdown not imminent
   return { pattern: 'Descending Triangle', dir: 'short', entry: rL[0].p * 0.999, support: rL[0].p, conf: 72 };
 }
 
@@ -230,7 +232,7 @@ function detectBullFlag(cs) {
   if ((flagHigh - flagLow) / flagLow > 0.03) return null; // flag must be tight
   if (flag[flag.length-1].close > flagLow + (flagHigh - flagLow) * 0.6) return null; // must be in lower half
   const cur = cs[cs.length-1];
-  if (cur.close < flagHigh * 0.998) return null; // breakout check
+  if (cur.close < flagHigh * 0.97) return null; // too far from breakout level
   return { pattern: 'Bull Flag', dir: 'long', entry: flagHigh * 1.001, flagLow, conf: 70 };
 }
 
@@ -242,7 +244,7 @@ function detectBearFlag(cs) {
   const flagHigh = Math.max(...flag.map(c => c.high)), flagLow = Math.min(...flag.map(c => c.low));
   if ((flagHigh - flagLow) / flagLow > 0.03) return null;
   const cur = cs[cs.length-1];
-  if (cur.close > flagLow * 1.002) return null;
+  if (cur.close > flagLow * 1.03) return null; // too far from breakdown level
   return { pattern: 'Bear Flag', dir: 'short', entry: flagLow * 0.999, flagHigh, conf: 70 };
 }
 
@@ -259,7 +261,7 @@ function detectFallingWedge(highs, lows, cs) {
   const lowSlope  = (rL[2].p - rL[0].p) / (rL[2].i - rL[0].i);
   if (highSlope >= lowSlope) return null; // not converging
   const cur = cs[cs.length - 1];
-  if (cur.close <= rH[2].p * 0.998) return null; // needs breakout above upper trendline
+  if (cur.close < rH[2].p * 0.97) return null; // too far below upper trendline
   return { pattern: 'Falling Wedge', dir: 'long', entry: rH[2].p * 1.001, swingLow: rL[2].p, conf: 74 };
 }
 
@@ -275,7 +277,7 @@ function detectRisingWedge(highs, lows, cs) {
   const lowSlope  = (rL[2].p - rL[0].p) / (rL[2].i - rL[0].i);
   if (lowSlope <= highSlope) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close >= rL[2].p * 1.002) return null; // needs breakdown below lower trendline
+  if (cur.close > rL[2].p * 1.03) return null; // too far above lower trendline
   return { pattern: 'Rising Wedge', dir: 'short', entry: rL[2].p * 0.999, swingHigh: rH[2].p, conf: 74 };
 }
 
@@ -302,7 +304,7 @@ function detectCupHandle(cs) {
   if ((handleHigh - handleLow) / handleLow > 0.06) return null; // handle too wide
   if (handleHigh > rimRight * 1.005) return null; // handle must be below rim
   const cur = cs[cs.length - 1];
-  if (cur.close < rimRight * 0.998) return null; // needs breakout above rim
+  if (cur.close < rimRight * 0.97) return null; // too far below rim — breakout not imminent
   return { pattern: 'Cup & Handle', dir: 'long', entry: rimRight * 1.001, swingLow: cupLow, conf: 78 };
 }
 
@@ -664,17 +666,18 @@ function updateSignalOnPrice(sig, price) {
 
   if (sig.status === 'pending') {
     const tol = sig.entry * 0.003;
-    // Direction-aware entry: a limit BUY fills when price drops to/through the zone,
-    // a limit SELL fills when price rises to/through the zone.
+    // Breakout entry: BUY fires when price RISES to/through the neckline,
+    // SELL fires when price FALLS to/through the neckline.
+    // Signal is detected while price approaches — trade enters on the actual breakout.
     const entryHit = dir === 'long'
-      ? price <= sig.entry + tol    // price reached or passed through buy zone from above
-      : price >= sig.entry - tol;   // price reached or passed through sell zone from below
-    if (entryHit) return { status: 'entered', entry_price: sig.entry, entered_at: now };
+      ? price >= sig.entry - tol    // price rose to/through neckline (breakout up)
+      : price <= sig.entry + tol;   // price fell to/through neckline (breakout down)
+    if (entryHit) return { status: 'entered', entry_price: price, entered_at: now };
 
-    // Price ran away in wrong direction — limit will never fill
+    // Pattern invalidated — price moved away from neckline in the wrong direction
     const blown = dir === 'long'
-      ? price > sig.entry * 1.015   // 1.5% above entry: pullback opportunity gone
-      : price < sig.entry * 0.985;  // 1.5% below entry: push opportunity gone
+      ? price < sig.entry * 0.97    // dropped 3% below neckline — failed setup
+      : price > sig.entry * 1.03;   // rose 3% above neckline — failed setup
     if (blown) return { status: 'expired' };
   }
 
