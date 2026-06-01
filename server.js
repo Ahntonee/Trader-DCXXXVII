@@ -19,7 +19,8 @@ app.use(express.json({ limit: '16kb' })); // cap body size
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT       = process.env.PORT || 3000;
-const HOST       = process.env.HOST || '127.0.0.1'; // localhost-only by default
+// On Render/cloud HOST must be 0.0.0.0; for local installs keep 127.0.0.1
+const HOST       = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 const TWELVE_KEY = process.env.TWELVE_DATA_KEY || '';
 
 // ── Input validation helpers ──────────────────────────────────────
