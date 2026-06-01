@@ -115,6 +115,7 @@ const insertJournal = db.prepare(`
 
 const getJournal   = db.prepare(`SELECT * FROM journal ORDER BY closed_at DESC LIMIT 200`);
 const clearJournal = db.prepare(`DELETE FROM journal`);
+const updateSignalSL = db.prepare(`UPDATE signals SET sl=@sl WHERE id=@id`);
 
 // ── Pattern stats ─────────────────────────────────────────────
 const upsertPatternStat = db.prepare(`
@@ -162,6 +163,7 @@ module.exports = {
   insertJournal,
   getJournal,
   clearJournal,
+  updateSignalSL,
   upsertPatternStat,
   getPatternStats,
   getPatternWinRate,

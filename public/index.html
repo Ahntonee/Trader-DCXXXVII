@@ -92,6 +92,17 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .tab-content{display:none;flex:1;overflow-y:auto;flex-direction:column;}
 .tab-content.active{display:flex;}
 
+/* ── Position Sizing Bar ── */
+.pos-size-bar{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--panel2);border-bottom:1px solid var(--border);flex-shrink:0;}
+.pos-size-lbl{font-size:8px;color:var(--muted);letter-spacing:1px;white-space:nowrap;}
+.pos-size-input{background:var(--bg);border:1px solid var(--border2);border-radius:3px;padding:4px 8px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:10px;width:100px;}
+.pos-size-input:focus{outline:none;border-color:var(--accent);}
+.pos-size-result{font-size:9px;color:var(--accent);margin-left:4px;font-weight:600;}
+.sig-sizing{margin-top:6px;padding:6px 8px;border-radius:4px;background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);font-size:9px;display:flex;gap:12px;flex-wrap:wrap;}
+.sz-item{display:flex;flex-direction:column;gap:1px;}
+.sz-lbl{font-size:7px;color:var(--muted);letter-spacing:1px;}
+.sz-val{font-weight:700;color:var(--accent);}
+
 /* ── Signal Cards (exchange-agnostic) ── */
 .signals-wrap{padding:10px;display:flex;flex-direction:column;gap:8px;}
 .no-signals{text-align:center;padding:40px 16px;color:var(--muted);font-size:10px;letter-spacing:1px;line-height:1.8;}
@@ -348,6 +359,13 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
     </div>
 
     <div class="tab-content active" id="tab-signals">
+      <div class="pos-size-bar">
+        <span class="pos-size-lbl">ACCOUNT</span>
+        <input class="pos-size-input" id="psAccount" type="number" placeholder="10000" min="1" step="any">
+        <span class="pos-size-lbl">RISK %</span>
+        <input class="pos-size-input" id="psRisk" type="number" placeholder="1" min="0.1" max="5" step="0.1" style="width:60px">
+        <span class="pos-size-result" id="psResult">— set account to see sizing</span>
+      </div>
       <div class="signals-wrap" id="signalsWrap">
         <div class="no-signals"><div style="font-size:20px;margin-bottom:12px;opacity:0.3">◈</div>SERVER SCANNING MARKETS<br><span style="font-size:9px;color:var(--muted2)">Signals appear when high-probability setups are detected</span></div>
       </div>
@@ -478,7 +496,7 @@ function handleServerMessage(msg) {
       if (signals[msg.id]) {
         Object.assign(signals[msg.id], msg.updates);
         renderSignals();
-        if (msg.updates.status==='tp1_hit') { showAlert(`✅ TP1 HIT — ${signals[msg.id].sym} · Move SL to breakeven`,'tp'); flashChart('long'); }
+        if (msg.updates.status==='tp1_hit') { showAlert(`🔄 TP1 HIT — ${signals[msg.id].sym} · 50% locked, trailing stop armed`,'tp'); flashChart('long'); }
         if (msg.updates.status==='tp2_hit') { showAlert(`🎯 TP2 HIT — ${signals[msg.id].sym} · FULL TARGET`,'tp'); flashChart('long'); }
         if (msg.updates.status==='sl_hit')  { showAlert(`🛑 STOPPED — ${signals[msg.id].sym}`,'sl'); flashChart('short'); }
         refreshSignalLines();
@@ -756,7 +774,15 @@ function buildSignalCard(s) {
   const entryLow=s.dir==='long'?entry-entryBand:entry;
   const entryHigh=s.dir==='long'?entry+entryBand:entry+entryBand;
 
-  const statusText={pending:'⏳ AWAITING ENTRY',entered:'⚡ IN TRADE — monitor SL',tp1_hit:'✅ TP1 HIT — move SL to breakeven',tp2_hit:'🎯 TP2 HIT — full target reached',sl_hit:'🛑 STOPPED OUT',expired:'⏰ EXPIRED'}[s.status]||s.status.toUpperCase();
+  const trailPrice = s.status==='tp1_hit' ? fmt(s.sl,dec) : null;
+  const statusText={
+    pending:  '⏳ AWAITING ENTRY',
+    entered:  '⚡ IN TRADE — monitor SL',
+    tp1_hit:  `🔄 TRAILING — 50% locked +1.5R · stop: ${trailPrice}`,
+    tp2_hit:  '🎯 TP2 HIT — full target reached',
+    sl_hit:   '🛑 STOPPED OUT',
+    expired:  '⏰ EXPIRED',
+  }[s.status]||s.status.toUpperCase();
 
   // Live P&L (if entered)
   let pnlHtml='';
@@ -771,6 +797,7 @@ function buildSignalCard(s) {
 
   const adxBadge=s.adx?`<span class="adx-badge trending">ADX ${s.adx}</span>`:'';
   const histWRBadge=s.hist_win_rate!=null?`<span class="hist-wr">Hist WR: ${Math.round(s.hist_win_rate*100)}%</span>`:'';
+  const mtfBadge=s.mtf_stack?`<span style="font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(255,201,71,0.15);color:var(--gold);border:1px solid rgba(255,201,71,0.35);font-weight:700;letter-spacing:0.5px;">✦ MULTI-TF ${s.mtf_tfs||''}</span>`:'';
   const confClass=s.confidence>=80?'high':'med';
   const tfBadge=s.tf?s.tf.toUpperCase():'';
   const cpBadge=s.candle_pattern?`<span class="cp-badge ${s.dir==='long'?'bull':'bear'}">🕯 ${s.candle_pattern}</span>`:'';
@@ -783,7 +810,7 @@ function buildSignalCard(s) {
         <span class="sig-conf ${confClass}">${s.confidence}%</span>
       </div>
     </div>
-    <div class="sig-pattern">📐 ${s.pattern} ${cpBadge} ${adxBadge} ${histWRBadge}</div>
+    <div class="sig-pattern">📐 ${s.pattern} ${cpBadge} ${adxBadge} ${histWRBadge} ${mtfBadge}</div>
     ${pnlHtml}
     <div class="sig-levels-main">
       <div class="sig-level-row entry-row">
@@ -791,9 +818,9 @@ function buildSignalCard(s) {
         <div class="slr-price">${fmt(entryLow,dec)} – ${fmt(entryHigh,dec)}</div>
       </div>
       <div class="sig-level-row sl-row">
-        <div class="slr-label">STOP LOSS</div>
+        <div class="slr-label">${s.status==='tp1_hit'?'TRAIL STOP':'STOP LOSS'}</div>
         <div class="slr-price">${fmt(sl,dec)}</div>
-        <div class="slr-pct">–${riskPct.toFixed(2)}%</div>
+        <div class="slr-pct">${s.status==='tp1_hit'?'trailing':'–'+riskPct.toFixed(2)+'%'}</div>
       </div>
       <div class="sig-level-row tp1-row">
         <div class="slr-label">TP1 (60%)</div>
@@ -807,9 +834,44 @@ function buildSignalCard(s) {
       <div>📈 HTF: <span>${(s.htf_bias||'—').toUpperCase()}</span></div>
       <div>⏰ Valid: <span>${s.tf==='15m'?'2 hrs':s.tf==='1h'?'6 hrs':s.tf==='4h'?'16 hrs':'3 days'}</span></div>
     </div>
+    ${buildSizingBlock(s)}
     <div class="sig-exchange-note">📋 Copy these levels to any exchange — Binance · Bybit · KuCoin · Coinex</div>
     <div class="sig-status-bar ${s.status}">${statusText}</div>
   </div>`;
+}
+
+// ── Position Sizing ────────────────────────────────────────────
+function getPosSettings() {
+  const acct = parseFloat(document.getElementById('psAccount')?.value) || 0;
+  const risk = parseFloat(document.getElementById('psRisk')?.value) || 1;
+  return { acct, risk };
+}
+
+function buildSizingBlock(s) {
+  const { acct, risk } = getPosSettings();
+  if (!acct || acct <= 0 || !s.entry || !s.sl) return '';
+  const riskUSD   = acct * (risk / 100);
+  const riskPerUnit = Math.abs(s.entry - s.sl);
+  if (!riskPerUnit) return '';
+  const units    = riskUSD / riskPerUnit;
+  const posSize  = units * s.entry;
+  const tp1USD   = riskUSD * 1.5;
+  const fmt2 = v => v >= 1000 ? '$'+v.toFixed(0) : '$'+v.toFixed(2);
+  return `<div class="sig-sizing">
+    <div class="sz-item"><div class="sz-lbl">RISK $</div><div class="sz-val">${fmt2(riskUSD)}</div></div>
+    <div class="sz-item"><div class="sz-lbl">UNITS</div><div class="sz-val">${units >= 1 ? units.toFixed(2) : units.toFixed(4)}</div></div>
+    <div class="sz-item"><div class="sz-lbl">POS SIZE</div><div class="sz-val">${fmt2(posSize)}</div></div>
+    <div class="sz-item"><div class="sz-lbl">TP1 PROFIT</div><div class="sz-val" style="color:var(--green)">+${fmt2(tp1USD)}</div></div>
+  </div>`;
+}
+
+function updateSizingDisplay() {
+  const { acct, risk } = getPosSettings();
+  const el = document.getElementById('psResult');
+  if (!el) return;
+  if (!acct) { el.textContent = '— set account to see sizing'; return; }
+  el.textContent = `${risk}% = $${(acct * risk / 100).toFixed(2)} risk per trade`;
+  renderSignals(); // rebuild cards with new sizing
 }
 
 function updateSignalLivePnL(pairId, price) {
@@ -947,7 +1009,7 @@ function renderJournal() {
   set('jExpired', s.expired     ?? 0);
 
   // ── Closed-trade stats (from journal) ───────────────────────────
-  const realTrades = journal.filter(j => ['tp1','tp2','sl'].includes(j.outcome));
+  const realTrades = journal.filter(j => ['tp1','tp2','sl','trail'].includes(j.outcome));
   set('jTotal', realTrades.length);
 
   if (!realTrades.length) {
@@ -990,7 +1052,7 @@ function renderJournal() {
   // ── Trade log ───────────────────────────────────────────────────
   document.getElementById('journalLog').innerHTML = realTrades.slice().reverse().slice(0,20).map(j => {
     const won = j.r_mult > 0;
-    const icon = j.outcome==='tp2' ? '🎯' : j.outcome==='tp1' ? '✅' : '🛑';
+    const icon = j.outcome==='tp2'?'🎯':j.outcome==='tp1'?'✅':j.outcome==='trail'?'📈':'🛑';
     return `<div class="jlog-e ${won?'win':'loss'}">
       <span class="jlog-sym">${j.sym}</span>
       <span class="jlog-type ${j.dir}">${j.dir.toUpperCase()}</span>
@@ -1124,6 +1186,16 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
 
 // Notification permission (only on user gesture, not on load)
 document.querySelector('.panel-tabs').addEventListener('click',()=>{ if(Notification?.permission==='default') Notification.requestPermission(); },{once:true});
+
+// Position sizing inputs — persist to localStorage
+['psAccount','psRisk'].forEach(id=>{
+  const el = document.getElementById(id);
+  if (!el) return;
+  const saved = localStorage.getItem('apex_'+id);
+  if (saved) el.value = saved;
+  el.addEventListener('input', ()=>{ localStorage.setItem('apex_'+id, el.value); updateSizingDisplay(); });
+});
+updateSizingDisplay();
 
 // ═══════════════════════════════════════════════════════════════
 // INIT

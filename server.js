@@ -47,6 +47,15 @@ const CRYPTO_PAIRS = [
   // ── High-volume meme / narrative tokens ───────────────────────
   { id: 'PEPEUSDT', sym: 'PEPE', dec: 8,  minMove: 0.00000001 },
   { id: 'WIFUSDT',  sym: 'WIF',  dec: 4,  minMove: 0.0001  },
+  // ── Ecosystem / narrative expansion ───────────────────────────
+  { id: 'NEARUSDT', sym: 'NEAR', dec: 3,  minMove: 0.001   },
+  { id: 'INJUSDT',  sym: 'INJ',  dec: 3,  minMove: 0.001   },
+  { id: 'OPUSDT',   sym: 'OP',   dec: 4,  minMove: 0.0001  },
+  { id: 'ARBUSDT',  sym: 'ARB',  dec: 4,  minMove: 0.0001  },
+  { id: 'JUPUSDT',  sym: 'JUP',  dec: 4,  minMove: 0.0001  },
+  { id: 'APTUSDT',  sym: 'APT',  dec: 3,  minMove: 0.001   },
+  { id: 'ATOMUSDT', sym: 'ATOM', dec: 3,  minMove: 0.001   },
+  { id: 'TIAUSDT',  sym: 'TIA',  dec: 3,  minMove: 0.001   },
 ];
 
 const FOREX_PAIRS = [
@@ -231,6 +240,27 @@ wss.on('connection', ws => {
 
 async function processNewSignal(sig) {
   try {
+    // ── MTF confluence check ─────────────────────────────────────
+    // If another active signal for the same pair + direction already
+    // exists on a DIFFERENT timeframe, both signals are "stacked" —
+    // the incoming one is marked MULTI-TF and gets a confidence boost.
+    const existing = db.getActiveSignals.all().filter(s =>
+      s.pair_id  === sig.pair_id &&
+      s.dir      === sig.dir     &&
+      s.tf       !== sig.tf      &&
+      ['pending','entered'].includes(s.status)
+    );
+    if (existing.length > 0) {
+      sig = {
+        ...sig,
+        mtf_stack:  true,
+        mtf_tfs:    [...new Set([...existing.map(s => s.tf), sig.tf])].join('+'),
+        confidence: Math.min(sig.confidence + 4, 96), // +4 pts, hard cap 96
+        filters:    sig.filters ? sig.filters + ' · ✦ MULTI-TF' : '✦ MULTI-TF',
+      };
+      console.log(`[MTF] ${sig.sym} ${sig.dir.toUpperCase()} stacked on ${sig.mtf_tfs}`);
+    }
+
     db.insertSignal.run({
       ...sig,
       candle_pattern: sig.candle_pattern || null,
@@ -241,7 +271,7 @@ async function processNewSignal(sig) {
     broadcast({ type: 'summary_init', data: db.getSignalSummary.get() });
     const tgMsg = tg.formatSignal(sig);
     await tg.sendMessage(tgMsg);
-    console.log(`[SIGNAL] ${sig.dir.toUpperCase()} ${sig.sym} ${sig.tf} | ${sig.pattern} | Conf: ${sig.confidence}% | ADX: ${sig.adx}`);
+    console.log(`[SIGNAL] ${sig.dir.toUpperCase()} ${sig.sym} ${sig.tf} | ${sig.pattern} | Conf: ${sig.confidence}%${sig.mtf_stack ? ' | ✦ MTF' : ''} | ADX: ${sig.adx}`);
   } catch (e) {
     console.warn('[processNewSignal] error:', e.message);
   }
@@ -260,38 +290,112 @@ function handleSignalUpdate(sig, updates) {
     });
     broadcast({ type: 'signal_update', id: sig.id, updates });
 
-    // Log to journal on close
-    if (['tp1_hit', 'tp2_hit', 'sl_hit'].includes(updates.status)) {
-      const outcome = updates.status.replace('_hit', '');
-      const entryPrice = updates.entry_price || sig.entry_price || sig.entry;
-      const exitPrice  = updates.close_price || (updates.status === 'sl_hit' ? sig.sl : updates.status === 'tp1_hit' ? sig.tp1 : sig.tp2);
-      const riskPx  = Math.abs(entryPrice - sig.sl);
-      const rMult   = riskPx > 0 ? (updates.r_mult || ((exitPrice - entryPrice) * (sig.dir === 'long' ? 1 : -1)) / riskPx) : 0;
-      const pnlPct  = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice * (sig.dir === 'long' ? 100 : -100)) : 0;
+    // ── TP1 HIT: lock 50% at +1.5R, arm trailing stop ─────────────
+    if (updates.status === 'tp1_hit') {
+      const entryPx  = updates.entry_price ?? sig.entry_price ?? sig.entry;
+      const exitPrice = updates.close_price || sig.tp1;
+
+      // Set trail stop to breakeven in DB — computeTrailStop will only move it up from here
+      db.updateSignalSL.run({ id: sig.id, sl: entryPx });
+      broadcast({ type: 'signal_update', id: sig.id, updates: { sl: entryPx } });
+
+      // Journal: 50% partial exit
+      const pnlPct = entryPx > 0 ? ((exitPrice - entryPx) / entryPx * (sig.dir === 'long' ? 100 : -100)) : 0;
       db.insertJournal.run({
         signal_id: sig.id, sym: sig.sym, tf: sig.tf, dir: sig.dir,
-        pattern: sig.pattern, htf_bias: sig.htf_bias, entry: entryPrice,
-        exit_price: exitPrice, sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2,
-        outcome, r_mult: +rMult.toFixed(3), pnl_pct: +pnlPct.toFixed(3),
-        confidence: sig.confidence, opened_at: sig.entered_at || sig.detected_at,
-        closed_at: updates.closed_at, date: new Date().toISOString().slice(0,10),
+        pattern: sig.pattern, htf_bias: sig.htf_bias,
+        entry: entryPx, exit_price: exitPrice,
+        sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2,
+        outcome: 'tp1', r_mult: 1.5, pnl_pct: +pnlPct.toFixed(3),
+        confidence: sig.confidence,
+        opened_at: sig.entered_at || sig.detected_at,
+        closed_at: updates.closed_at,
+        date: new Date().toISOString().slice(0, 10),
       });
       db.upsertPatternStat.run({
         pattern: sig.pattern, tf: sig.tf, asset_class: sig.asset_class || 'crypto',
-        wins: ['tp1','tp2'].includes(outcome) ? 1 : 0,
-        losses: outcome === 'sl' ? 1 : 0,
-        total_r: rMult, count: 1,
-        win_rate: ['tp1','tp2'].includes(outcome) ? 1 : 0,
-        avg_r: rMult,
+        wins: 1, losses: 0, total_r: 1.5, count: 1, win_rate: 1, avg_r: 1.5,
       });
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
       broadcast({ type: 'summary_init', data: db.getSignalSummary.get() });
-      // Telegram alert
+      tg.sendMessage(tg.formatTPHit(sig, 'tp1'));
+      console.log(`[TRAIL] ${sig.sym} TP1 hit — 50% locked +1.5R, trailing stop armed at breakeven`);
+    }
+
+    // ── TRAIL CLOSE or TP2: log remaining 50% ─────────────────────
+    if (['tp2_hit', 'sl_hit'].includes(updates.status)) {
+      const wasTrailing = sig.status === 'tp1_hit'; // came from tp1_hit state
+      const entryPx    = sig.entry_price ?? sig.entry;
+      const exitPrice  = updates.close_price ?? (updates.status === 'sl_hit' ? sig.sl : sig.tp2);
+
+      let rMult;
+      if (wasTrailing) {
+        // Trailing portion r_mult — computed from entry to trail/TP2 exit, always >= 0
+        const risk = Math.abs(sig.tp1 - sig.entry) / 1.5;
+        rMult = risk > 0
+          ? (sig.dir === 'long' ? (exitPrice - entryPx) : (entryPx - exitPrice)) / risk
+          : 0;
+        rMult = Math.max(0, +rMult.toFixed(3));
+      } else {
+        // Standard entered → SL or (theoretical) direct close
+        rMult = updates.status === 'sl_hit' ? -1 : 2.5;
+      }
+
+      const outcome   = wasTrailing
+        ? (updates.status === 'tp2_hit' ? 'tp2' : 'trail')
+        : updates.status.replace('_hit', '');
+      const pnlPct    = entryPx > 0
+        ? ((exitPrice - entryPx) / entryPx * (sig.dir === 'long' ? 100 : -100))
+        : 0;
+
+      db.insertJournal.run({
+        signal_id: sig.id, sym: sig.sym, tf: sig.tf, dir: sig.dir,
+        pattern: sig.pattern, htf_bias: sig.htf_bias,
+        entry: entryPx, exit_price: exitPrice,
+        sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2,
+        outcome, r_mult: rMult, pnl_pct: +pnlPct.toFixed(3),
+        confidence: sig.confidence,
+        opened_at: sig.entered_at || sig.detected_at,
+        closed_at: updates.closed_at,
+        date: new Date().toISOString().slice(0, 10),
+      });
+      db.upsertPatternStat.run({
+        pattern: sig.pattern, tf: sig.tf, asset_class: sig.asset_class || 'crypto',
+        wins: rMult > 0 ? 1 : 0, losses: rMult <= 0 ? 1 : 0,
+        total_r: rMult, count: 1,
+        win_rate: rMult > 0 ? 1 : 0, avg_r: rMult,
+      });
+      broadcast({ type: 'journal_update', data: db.getJournal.all() });
+      broadcast({ type: 'summary_init', data: db.getSignalSummary.get() });
+
       if (updates.status === 'sl_hit') tg.sendMessage(tg.formatSLHit(sig));
       else tg.sendMessage(tg.formatTPHit(sig, outcome));
+
+      if (wasTrailing)
+        console.log(`[TRAIL] ${sig.sym} trail closed — 50% at ${rMult >= 0 ? '+' : ''}${rMult}R (exit: ${exitPrice})`);
     }
   } catch (e) {
     console.warn('[handleSignalUpdate] error:', e.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TRAILING STOP CALCULATOR
+// After TP1 is hit, server keeps sig.sl updated in the DB as the
+// live trailing stop. Trail distance = 0.5R behind current price.
+// Stop only moves in favour — never backwards.
+// ═══════════════════════════════════════════════════════════════════
+
+function computeTrailStop(sig, price) {
+  const originalRisk = Math.abs(sig.tp1 - sig.entry) / 1.5;
+  if (!originalRisk) return null;
+  const trailDist = originalRisk * 0.5; // trail 0.5R behind price
+  if (sig.dir === 'long') {
+    const t = price - trailDist;
+    return t > sig.sl ? +t.toFixed(8) : null; // only move up
+  } else {
+    const t = price + trailDist;
+    return t < sig.sl ? +t.toFixed(8) : null; // only move down
   }
 }
 
@@ -309,9 +413,18 @@ async function updateCryptoPrices() {
       _latestPrices[pair.id] = price;
       broadcast({ type: 'price', pairId: pair.id, price, change: chg });
 
-      // Update signal statuses
+      // Update trailing stops first, then check signal statuses
       const active = db.getActiveSignals.all().filter(s => s.pair_id === pair.id);
       for (const sig of active) {
+        // Move trail stop for signals that already hit TP1
+        if (sig.status === 'tp1_hit') {
+          const newTrail = computeTrailStop(sig, price);
+          if (newTrail !== null) {
+            db.updateSignalSL.run({ id: sig.id, sl: newTrail });
+            sig.sl = newTrail; // update in-memory so status check sees it
+            broadcast({ type: 'signal_update', id: sig.id, updates: { sl: newTrail } });
+          }
+        }
         const update = engine.updateSignalOnPrice(sig, price);
         if (update) handleSignalUpdate(sig, update);
       }
@@ -337,11 +450,8 @@ async function updateForexPrices() {
 // SIGNAL SCANNER (runs on intervals)
 // ═══════════════════════════════════════════════════════════════════
 
-let _cryptoScanIdx = 0;
-async function scanCryptoSignals() {
-  db.expireOldSignals.run(Date.now());
-  const pair = CRYPTO_PAIRS[_cryptoScanIdx % CRYPTO_PAIRS.length];
-  _cryptoScanIdx++;
+// Scan a single pair across all timeframes — used by the parallel scanner
+async function scanOnePair(pair) {
   for (const tf of TIMEFRAMES) {
     try {
       const limit    = CANDLE_LIMIT[tf] || 200;
@@ -356,7 +466,21 @@ async function scanCryptoSignals() {
     } catch (e) {
       console.warn(`[Scan] ${pair.id} ${tf}:`, e.message);
     }
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 200)); // small gap between TFs on same pair
+  }
+}
+
+// Parallel scanner: splits pairs into batches of 4, runs concurrently.
+// Full cycle: ~3 min for 26 pairs (vs 39 min sequential)
+async function scanCryptoSignals() {
+  db.expireOldSignals.run(Date.now());
+  const BATCH = 4;
+  for (let i = 0; i < CRYPTO_PAIRS.length; i += BATCH) {
+    const batch = CRYPTO_PAIRS.slice(i, i + BATCH);
+    await Promise.all(batch.map(pair => scanOnePair(pair).catch(e =>
+      console.warn(`[Scan] ${pair.id} batch error:`, e.message)
+    )));
+    await new Promise(r => setTimeout(r, 500)); // gap between batches
   }
 }
 
@@ -518,7 +642,7 @@ async function start() {
   }, 1500);
 
   // Intervals
-  setInterval(scanCryptoSignals, 90 * 1000);    // scan one crypto pair every 90s (cycles through all)
+  setInterval(scanCryptoSignals, 4 * 60 * 1000); // full parallel scan every 4 min
   setInterval(scanForexSignals,  5 * 60 * 1000); // scan one forex pair every 5min
   setInterval(updateCryptoPrices, 15 * 1000);    // price refresh every 15s
   setInterval(updateForexPrices,  60 * 1000);    // forex prices every 60s

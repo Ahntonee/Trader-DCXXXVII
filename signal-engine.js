@@ -246,6 +246,66 @@ function detectBearFlag(cs) {
   return { pattern: 'Bear Flag', dir: 'short', entry: flagLow * 0.999, flagHigh, conf: 70 };
 }
 
+// Falling Wedge (bullish): lower highs + lower lows converging, breakout up
+function detectFallingWedge(highs, lows, cs) {
+  if (highs.length < 3 || lows.length < 3) return null;
+  const rH = highs.slice(-3), rL = lows.slice(-3);
+  // Highs must be declining
+  if (!(rH[0].p > rH[1].p && rH[1].p > rH[2].p)) return null;
+  // Lows must be declining too (but less steeply = converging)
+  if (!(rL[0].p > rL[1].p && rL[1].p > rL[2].p)) return null;
+  // Slope of highs must be steeper than slope of lows (convergence)
+  const highSlope = (rH[2].p - rH[0].p) / (rH[2].i - rH[0].i);
+  const lowSlope  = (rL[2].p - rL[0].p) / (rL[2].i - rL[0].i);
+  if (highSlope >= lowSlope) return null; // not converging
+  const cur = cs[cs.length - 1];
+  if (cur.close <= rH[2].p * 0.998) return null; // needs breakout above upper trendline
+  return { pattern: 'Falling Wedge', dir: 'long', entry: rH[2].p * 1.001, swingLow: rL[2].p, conf: 74 };
+}
+
+// Rising Wedge (bearish): higher highs + higher lows converging, breakout down
+function detectRisingWedge(highs, lows, cs) {
+  if (highs.length < 3 || lows.length < 3) return null;
+  const rH = highs.slice(-3), rL = lows.slice(-3);
+  // Highs and lows both rising
+  if (!(rH[0].p < rH[1].p && rH[1].p < rH[2].p)) return null;
+  if (!(rL[0].p < rL[1].p && rL[1].p < rL[2].p)) return null;
+  // Lows slope must be steeper than highs slope (converging)
+  const highSlope = (rH[2].p - rH[0].p) / (rH[2].i - rH[0].i);
+  const lowSlope  = (rL[2].p - rL[0].p) / (rL[2].i - rL[0].i);
+  if (lowSlope <= highSlope) return null;
+  const cur = cs[cs.length - 1];
+  if (cur.close >= rL[2].p * 1.002) return null; // needs breakdown below lower trendline
+  return { pattern: 'Rising Wedge', dir: 'short', entry: rL[2].p * 0.999, swingHigh: rH[2].p, conf: 74 };
+}
+
+// Cup & Handle (bullish): rounded bottom + brief consolidation before breakout
+function detectCupHandle(cs) {
+  if (cs.length < 60) return null;
+  const slice = cs.slice(-60);
+  const half  = Math.floor(slice.length / 2);
+  // Left half: find cup low (price goes down then up)
+  const leftHalf  = slice.slice(0, half);
+  const rightHalf = slice.slice(half);
+  const cupLow    = Math.min(...leftHalf.map(c => c.low));
+  const rimLeft   = Math.max(leftHalf[0].high, leftHalf[1].high);
+  const rimRight  = Math.max(...rightHalf.slice(0, 5).map(c => c.high));
+  // Rims must be at similar level (within 1.5%)
+  if (Math.abs(rimLeft - rimRight) / rimLeft > 0.015) return null;
+  // Cup depth: 10–35% pullback from rim
+  const depth = (rimLeft - cupLow) / rimLeft;
+  if (depth < 0.10 || depth > 0.35) return null;
+  // Handle: last 10 bars should be a tight consolidation below rim
+  const handleSlice = slice.slice(-10);
+  const handleHigh  = Math.max(...handleSlice.map(c => c.high));
+  const handleLow   = Math.min(...handleSlice.map(c => c.low));
+  if ((handleHigh - handleLow) / handleLow > 0.06) return null; // handle too wide
+  if (handleHigh > rimRight * 1.005) return null; // handle must be below rim
+  const cur = cs[cs.length - 1];
+  if (cur.close < rimRight * 0.998) return null; // needs breakout above rim
+  return { pattern: 'Cup & Handle', dir: 'long', entry: rimRight * 1.001, swingLow: cupLow, conf: 78 };
+}
+
 // Bullish/bearish engulfing on clean S/R level
 function detectEngulfingAtSR(cs, levels, dir) {
   if (cs.length < 3) return null;
@@ -444,6 +504,9 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     detectDescendingTriangle(highs, lows, cs),
     detectBullFlag(cs),
     detectBearFlag(cs),
+    detectFallingWedge(highs, lows, cs),
+    detectRisingWedge(highs, lows, cs),
+    detectCupHandle(cs),
     detectEngulfingAtSR(cs, levels, 'long'),
     detectEngulfingAtSR(cs, levels, 'short'),
   ].filter(Boolean);
@@ -568,6 +631,17 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
 // ─── SIGNAL STATUS UPDATE ───────────────────────────────────────────
 // Called on each new price tick. Returns updated status if changed.
 
+// Computes R-multiple for the trailing portion relative to original risk.
+// Used after TP1 to calculate how much the trailing half made.
+function computeRMult(sig, exitPrice) {
+  const originalRisk = Math.abs(sig.tp1 - sig.entry) / 1.5;
+  if (!originalRisk) return 0;
+  const entryPx = sig.entry_price ?? sig.entry;
+  return sig.dir === 'long'
+    ? (exitPrice - entryPx) / originalRisk
+    : (entryPx - exitPrice) / originalRisk;
+}
+
 function updateSignalOnPrice(sig, price) {
   if (['sl_hit', 'tp2_hit', 'expired'].includes(sig.status)) return null;
 
@@ -595,13 +669,18 @@ function updateSignalOnPrice(sig, price) {
   }
 
   if (['entered', 'tp1_hit'].includes(sig.status)) {
-    // After TP1 is hit, SL moves to breakeven (entry price) — retrace can't give -1R anymore
     const isAfterTP1 = sig.status === 'tp1_hit';
-    const effectiveSL = isAfterTP1 ? (sig.entry_price ?? sig.entry) : sig.sl;
-    const slRMult = isAfterTP1 ? 0 : -1;
 
-    if (dir === 'long'  && price <= effectiveSL) return { status: 'sl_hit',  close_price: price, r_mult: slRMult, closed_at: now };
-    if (dir === 'short' && price >= effectiveSL) return { status: 'sl_hit',  close_price: price, r_mult: slRMult, closed_at: now };
+    // After TP1, sig.sl is the live trail stop (updated by server on each price tick).
+    // For entered signals sig.sl is the original structure SL.
+    if (dir === 'long'  && price <= sig.sl) {
+      const rMult = isAfterTP1 ? Math.max(0, computeRMult(sig, sig.sl)) : -1;
+      return { status: 'sl_hit', close_price: sig.sl, r_mult: rMult, closed_at: now };
+    }
+    if (dir === 'short' && price >= sig.sl) {
+      const rMult = isAfterTP1 ? Math.max(0, computeRMult(sig, sig.sl)) : -1;
+      return { status: 'sl_hit', close_price: sig.sl, r_mult: rMult, closed_at: now };
+    }
 
     if (!isAfterTP1 && sig.tp1) {
       if ((dir === 'long' && price >= sig.tp1) || (dir === 'short' && price <= sig.tp1)) {
@@ -618,4 +697,4 @@ function updateSignalOnPrice(sig, price) {
   return null;
 }
 
-module.exports = { scanPair, updateSignalOnPrice, setPatternWinRates, calcADX, calcATR, calcEMA, calcRSI, calcMACD, findSwings, calcSR };
+module.exports = { scanPair, updateSignalOnPrice, setPatternWinRates, computeRMult, calcADX, calcATR, calcEMA, calcRSI, calcMACD, findSwings, calcSR };
