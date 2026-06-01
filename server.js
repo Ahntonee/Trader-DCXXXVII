@@ -507,6 +507,47 @@ async function scanForexSignals() {
   }
 }
 
+// ── Dedicated 15m fast scanner ────────────────────────────────────
+// Runs every 90 s — only the 15m timeframe, all 26 pairs in batches
+// of 6. Skips pairs that already have a live 15m signal so the DB
+// doesn't fill up with duplicates between full-scan cycles.
+async function scan15mFast() {
+  const TF       = '15m';
+  const HTF      = MTF_MAP[TF];                 // '1h'
+  const limit    = CANDLE_LIMIT[TF]  || 200;
+  const htfLimit = CANDLE_LIMIT[HTF] || 200;
+
+  // Pairs that already have an active 15m signal — skip them
+  const activeTf15 = new Set(
+    db.getActiveSignals.all()
+      .filter(s => s.tf === TF && ['pending', 'entered', 'tp1_hit'].includes(s.status))
+      .map(s => s.pair_id)
+  );
+
+  const toScan = CRYPTO_PAIRS.filter(p => !activeTf15.has(p.id));
+  if (!toScan.length) return; // nothing to do
+
+  const BATCH = 6;
+  let found = 0;
+  for (let i = 0; i < toScan.length; i += BATCH) {
+    const batch = toScan.slice(i, i + BATCH);
+    const results = await Promise.allSettled(batch.map(async pair => {
+      const [candles, htfCandles] = await Promise.all([
+        getBinanceKlines(pair.id, TF,  limit),
+        getBinanceKlines(pair.id, HTF, htfLimit),
+      ]);
+      const newSigs = await engine.scanPair(candles, htfCandles, pair, TF, 'crypto');
+      for (const sig of newSigs) { await processNewSignal(sig); found++; }
+    }));
+    results.forEach((r, idx) => {
+      if (r.status === 'rejected')
+        console.warn(`[15m-fast] ${batch[idx].id}:`, r.reason?.message);
+    });
+    if (i + BATCH < toScan.length) await new Promise(r => setTimeout(r, 300));
+  }
+  if (found) console.log(`[15m-fast] ✦ ${found} new signal(s) detected`);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // API ROUTES
 // ═══════════════════════════════════════════════════════════════════
@@ -643,12 +684,14 @@ async function start() {
 
   // Intervals
   setInterval(scanCryptoSignals, 4 * 60 * 1000); // full parallel scan every 4 min
+  setInterval(scan15mFast,      90 * 1000);       // 15m fast scan every 90 s
   setInterval(scanForexSignals,  5 * 60 * 1000); // scan one forex pair every 5min
   setInterval(updateCryptoPrices, 15 * 1000);    // price refresh every 15s
   setInterval(updateForexPrices,  60 * 1000);    // forex prices every 60s
 
   // Initial scans on startup
   setTimeout(scanCryptoSignals, 3000);
+  setTimeout(scan15mFast,       8000);  // 15m first pass 8 s after full scan starts
   setTimeout(updateCryptoPrices, 5000);
 
   server.listen(PORT, () => {
