@@ -665,19 +665,20 @@ function updateSignalOnPrice(sig, price) {
   const dir = sig.dir;
 
   if (sig.status === 'pending') {
-    const tol = sig.entry * 0.003;
-    // Breakout entry: BUY fires when price RISES to/through the neckline,
-    // SELL fires when price FALLS to/through the neckline.
-    // Signal is detected while price approaches — trade enters on the actual breakout.
+    // Breakout entry with 0.5% confirmation buffer.
+    // Price must CLEAR the neckline by 0.5%, not just touch it.
+    // This filters out wick fakeouts — a real breakout sustains 0.5%+
+    // past the level; a fake spike usually doesn't hold that far.
+    const confirm = sig.entry * 0.005; // 0.5% past neckline
     const entryHit = dir === 'long'
-      ? price >= sig.entry - tol    // price rose to/through neckline (breakout up)
-      : price <= sig.entry + tol;   // price fell to/through neckline (breakout down)
+      ? price >= sig.entry + confirm   // cleared neckline by 0.5% to the upside
+      : price <= sig.entry - confirm;  // cleared neckline by 0.5% to the downside
     if (entryHit) return { status: 'entered', entry_price: price, entered_at: now };
 
     // Pattern invalidated — price moved away from neckline in the wrong direction
     const blown = dir === 'long'
-      ? price < sig.entry * 0.97    // dropped 3% below neckline — failed setup
-      : price > sig.entry * 1.03;   // rose 3% above neckline — failed setup
+      ? price < sig.entry * 0.97    // dropped 3% below neckline — setup failed
+      : price > sig.entry * 1.03;   // rose 3% above neckline — setup failed
     if (blown) return { status: 'expired' };
   }
 
