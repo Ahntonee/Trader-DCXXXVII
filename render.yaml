@@ -1,10 +1,20 @@
 services:
   - type: web
     name: apex-terminal
-    env: static
-    staticPublishPath: .
-    buildCommand: ""
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    plan: starter
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TWELVE_DATA_KEY
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+    disk:
+      name: apex-data
+      mountPath: /opt/render/project/src
+      sizeGB: 1
