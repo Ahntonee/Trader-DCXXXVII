@@ -15,11 +15,20 @@ const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocketServer({ server });
 
-app.use(express.json());
+app.use(express.json({ limit: '16kb' })); // cap body size
 app.use(express.static(path.join(__dirname, 'public')));
 
-const PORT = process.env.PORT || 3000;
+const PORT       = process.env.PORT || 3000;
+const HOST       = process.env.HOST || '127.0.0.1'; // localhost-only by default
 const TWELVE_KEY = process.env.TWELVE_DATA_KEY || '';
+
+// ── Input validation helpers ──────────────────────────────────────
+const VALID_SYMBOL   = /^[A-Z0-9]{2,20}(\/[A-Z]{2,6})?$/; // e.g. BTCUSDT or XAU/USD
+const VALID_INTERVAL = new Set(['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w']);
+function sanitizeLimit(raw, def = 200, max = 500) {
+  const n = parseInt(raw, 10);
+  return isNaN(n) ? def : Math.min(Math.max(n, 1), max);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // INSTRUMENTS
@@ -554,32 +563,39 @@ async function scan15mFast() {
 
 // Chart data proxy — browser fetches from here, no CORS issues
 app.get('/api/klines', async (req, res) => {
-  const { symbol, interval, limit = 200 } = req.query;
+  const { symbol = '', interval = '' } = req.query;
+  if (!VALID_SYMBOL.test(symbol))   return res.status(400).json({ error: 'Invalid symbol' });
+  if (!VALID_INTERVAL.has(interval)) return res.status(400).json({ error: 'Invalid interval' });
+  const limit = sanitizeLimit(req.query.limit);
   try {
-    const data = await getBinanceKlines(symbol, interval, +limit);
+    const data = await getBinanceKlines(symbol, interval, limit);
     res.json(data);
-  } catch (e) {
-    res.status(502).json({ error: e.message });
+  } catch {
+    res.status(502).json({ error: 'Data fetch failed' });
   }
 });
 
 app.get('/api/forex/klines', async (req, res) => {
-  const { symbol, interval, limit = 200 } = req.query;
+  const { symbol = '', interval = '' } = req.query;
+  if (!VALID_SYMBOL.test(symbol))   return res.status(400).json({ error: 'Invalid symbol' });
+  if (!VALID_INTERVAL.has(interval)) return res.status(400).json({ error: 'Invalid interval' });
+  const limit = sanitizeLimit(req.query.limit);
   try {
-    const data = await getForexKlines(symbol, interval, +limit);
+    const data = await getForexKlines(symbol, interval, limit);
     res.json(data);
-  } catch (e) {
-    res.status(502).json({ error: e.message });
+  } catch {
+    res.status(502).json({ error: 'Data fetch failed' });
   }
 });
 
 app.get('/api/ticker', async (req, res) => {
-  const { symbol } = req.query;
+  const { symbol = '' } = req.query;
+  if (!VALID_SYMBOL.test(symbol)) return res.status(400).json({ error: 'Invalid symbol' });
   try {
     const data = await getBinanceTicker(symbol);
     res.json(data);
-  } catch (e) {
-    res.status(502).json({ error: e.message });
+  } catch {
+    res.status(502).json({ error: 'Ticker fetch failed' });
   }
 });
 
@@ -616,9 +632,17 @@ app.get('/api/instruments', (req, res) => {
 
 // Trigger a full backtest run (can take several minutes)
 let _backtestRunning = false;
+let _backtestLastRun = 0;
+const BACKTEST_COOLDOWN_MS = 10 * 60 * 1000; // 10 min cooldown between runs
 app.post('/api/backtest/run', async (req, res) => {
   if (_backtestRunning) return res.status(409).json({ error: 'Backtest already running' });
+  const sinceLastRun = Date.now() - _backtestLastRun;
+  if (sinceLastRun < BACKTEST_COOLDOWN_MS) {
+    const waitSec = Math.ceil((BACKTEST_COOLDOWN_MS - sinceLastRun) / 1000);
+    return res.status(429).json({ error: `Cooldown: wait ${waitSec}s before next run` });
+  }
   _backtestRunning = true;
+  _backtestLastRun = Date.now();
   res.json({ started: true, message: 'Backtest started. Results will appear in the Backtest tab when complete.' });
   const pairs = req.body.pairs || CRYPTO_PAIRS; // default: all 26 pairs
   const tfs   = req.body.timeframes || ['1h', '4h'];
@@ -694,8 +718,8 @@ async function start() {
   setTimeout(scan15mFast,       8000);  // 15m first pass 8 s after full scan starts
   setTimeout(updateCryptoPrices, 5000);
 
-  server.listen(PORT, () => {
-    console.log(`\n🔺 APEX TERMINAL v2 running on http://localhost:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`\n🔺 APEX TERMINAL v2 running on http://${HOST}:${PORT}`);
     console.log(`   Crypto pairs: ${CRYPTO_PAIRS.length}  |  Forex pairs: ${FOREX_PAIRS.length}`);
     console.log(`   Telegram: ${process.env.TELEGRAM_TOKEN ? '✓ configured' : '✗ not set (add to .env)'}`);
     console.log(`   Twelve Data: ${TWELVE_KEY && TWELVE_KEY !== 'your_twelve_data_key_here' ? '✓ configured' : '✗ not set (forex disabled)'}\n`);
