@@ -52,11 +52,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .ch-btn{display:flex;align-items:center;gap:5px;padding:3px 9px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:9px;cursor:pointer;transition:all 0.15s;}
 .ch-btn.on{border-color:rgba(179,136,255,0.5);color:var(--purple);}
 .clock{font-size:11px;color:var(--text2);letter-spacing:1px;white-space:nowrap;}
-.watchbar{height:42px;display:flex;align-items:center;padding:0 8px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;gap:3px;overflow-x:auto;scroll-behavior:smooth;}
-.watchbar::-webkit-scrollbar{height:2px;}
-.watchbar::-webkit-scrollbar-track{background:transparent;}
-.watchbar::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
-.watchbar::-webkit-scrollbar-thumb:hover{background:var(--accent);}
+.watchbar{display:flex;flex-wrap:wrap;align-items:center;padding:5px 8px;gap:4px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
 .pair-btn{position:relative;display:flex;align-items:center;gap:5px;padding:3px 8px;border:1px solid var(--border2);border-radius:4px;background:transparent;color:var(--text2);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;cursor:pointer;transition:all 0.2s;white-space:nowrap;letter-spacing:0.3px;flex-shrink:0;}
 .pair-btn:hover{border-color:var(--accent);color:var(--accent);}
 .pair-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(0,212,255,0.05);}
@@ -393,7 +389,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 
     <div class="tab-content" id="tab-backtest">
       <div class="bt-wrap">
-        <div class="bt-note">Runs a walk-forward backtest on 18 months of historical data. Validates which patterns are actually profitable before the live engine uses them.<br><br>⏱ Takes 5–15 minutes. Run once per week.</div>
+        <div class="bt-note">Runs a walk-forward backtest on 18 months of historical data. Validates which patterns are actually profitable before the live engine uses them.<br><br>⏱ Takes 15–30 minutes (all 26 pairs × 1h + 4h). Run once per week.</div>
         <button class="bt-run-btn" id="btRunBtn" onclick="startBacktest()">▶ RUN BACKTEST</button>
         <div class="bt-progress" id="btProgress" style="display:none;">
           <div class="bt-prog-label" id="btProgLabel">Starting…</div>

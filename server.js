@@ -620,7 +620,7 @@ app.post('/api/backtest/run', async (req, res) => {
   if (_backtestRunning) return res.status(409).json({ error: 'Backtest already running' });
   _backtestRunning = true;
   res.json({ started: true, message: 'Backtest started. Results will appear in the Backtest tab when complete.' });
-  const pairs = req.body.pairs || CRYPTO_PAIRS.slice(0, 4); // default: BTC ETH SOL BNB
+  const pairs = req.body.pairs || CRYPTO_PAIRS; // default: all 26 pairs
   const tfs   = req.body.timeframes || ['1h', '4h'];
   let done = 0;
   const total = pairs.length * tfs.length;
