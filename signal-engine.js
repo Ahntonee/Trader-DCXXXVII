@@ -586,6 +586,16 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     // Sanity: risk must be at least 0.3% (too tight SL gets hunted)
     if (risk / raw.entry < 0.003) continue;
 
+    // ── Stale-entry filter ──────────────────────────────────────────
+    // If the current close has already run more than 1R past the entry,
+    // a limit order at `entry` will never fill — the breakout has escaped.
+    // Example: NEAR entry 2.36, risk 0.05, close 2.62 → 5.2R past entry → skip.
+    const currentClose = cs[cs.length - 1].close;
+    const overshootR = dir === 'long'
+      ? (currentClose - raw.entry) / risk
+      : (raw.entry - currentClose) / risk;
+    if (overshootR > 1.0) continue; // price already 1R+ beyond entry — unenterable
+
     const filterParts = [
       emaCheck.label,
       htfCheck.label,
