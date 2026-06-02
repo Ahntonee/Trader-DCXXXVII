@@ -631,13 +631,20 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     conf = Math.min(Math.round(conf), 96);
     if (conf < 70) continue;
 
-    // ── Entry at current market price ──────────────────────────
-    // Signals are tied to the live price at detection time so they
-    // are immediately actionable — no waiting for price to return
-    // to a historical neckline that may never be revisited.
-    const entry = cs[cs.length - 1].close;
+    // ── Hybrid entry: confirmed breakout vs pending breakout ───
+    // neckline = the pattern's key level (neckline / trendline / rim).
+    // CONFIRMED  → price has already cleared the level in the trade
+    //   direction. Enter at current market price (immediately actionable,
+    //   card shows the live price you can trade right now).
+    // NOT CONFIRMED → price has not yet broken the level. Set entry AT
+    //   the neckline and wait for the real break before triggering — no
+    //   premature entry on a pattern that hasn't confirmed.
+    const neckline  = raw.entry;
+    const close     = cs[cs.length - 1].close;
+    const confirmed = dir === 'long' ? close >= neckline : close <= neckline;
+    const entry     = confirmed ? close : neckline;
 
-    // ── Structure-based SL from current price ──────────────────
+    // ── Structure-based SL from entry ──────────────────────────
     const sl = structureSL(dir, lows, highs, cs, entry);
     if (dir === 'long'  && sl >= entry) continue; // degenerate
     if (dir === 'short' && sl <= entry) continue;
@@ -661,6 +668,7 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       `${positiveVotes}/5 factors`,
       histBonus.winRate != null ? `Hist WR: ${Math.round(histBonus.winRate * 100)}%` : null,
       sessionBonus.label,               // e.g. "⚡ LON-NY OVERLAP"
+      confirmed ? '✓ BREAKOUT CONFIRMED' : '⧗ AWAITING BREAK',
     ].filter(Boolean).join(' · ');
 
     const expiresAt = Date.now() + (EXPIRY_MINS[tf] || 360) * 60 * 1000;
@@ -689,6 +697,7 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       // Extra info for frontend display
       hist_win_rate:  histBonus.winRate,
       votes:          positiveVotes,
+      confirmed,                        // true = live-price entry, false = waiting for break
     });
   }
 
@@ -725,11 +734,11 @@ function updateSignalOnPrice(sig, price) {
     // filter single-tick wick fakeouts.
     const confirm = sig.entry * 0.002; // 0.2% confirmation
     const entryHit = dir === 'long'
-      ? price >= sig.entry + confirm   // cleared neckline by 0.5% to the upside
-      : price <= sig.entry - confirm;  // cleared neckline by 0.5% to the downside
+      ? price >= sig.entry + confirm   // cleared entry by 0.2% to the upside
+      : price <= sig.entry - confirm;  // cleared entry by 0.2% to the downside
     if (entryHit) return { status: 'entered', entry_price: price, entered_at: now };
 
-    // Pattern invalidated — price moved away from neckline in the wrong direction
+    // Pattern invalidated — price moved away from entry in the wrong direction
     const blown = dir === 'long'
       ? price < sig.entry * 0.97    // dropped 3% below neckline — setup failed
       : price > sig.entry * 1.03;   // rose 3% above neckline — setup failed
