@@ -1014,40 +1014,67 @@ function renderJournal() {
   const s = signalSummary;
   const set = (id, v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
   set('jFired',   s.total_fired ?? 0);
-  set('jActive',  s.active      ?? 0);
-  set('jTP1',     s.tp1_hits    ?? 0);
-  set('jTP2',     s.tp2_hits    ?? 0);
-  set('jSL',      s.sl_hits     ?? 0);
   set('jExpired', s.expired     ?? 0);
 
-  // ── Closed-trade stats (from journal) ───────────────────────────
-  const realTrades = journal.filter(j => ['tp1','tp2','sl','trail'].includes(j.outcome));
-  set('jTotal', realTrades.length);
+  // ── Closed-trade stats — scored at the POSITION level ───────────
+  // A single trade can write up to TWO journal rows: a TP1 partial
+  // (50% booked at +1.5R) plus its closing half (TP2 or trailed out).
+  // To keep counters honest we group rows by signal_id and score each
+  // unique position once. Guarantees: TP1 ≥ TP2, and closed ≤ fired.
+  const fills = journal.filter(j => ['tp1','tp2','sl','trail'].includes(j.outcome));
+  const byId = {};
+  fills.forEach(j => { (byId[j.signal_id] = byId[j.signal_id] || []).push(j); });
 
-  if (!realTrades.length) {
+  const closed = [];                       // { r, t } per fully-closed position
+  let nTP1 = 0, nTP2 = 0, nSL = 0, nOpen = 0;
+  Object.values(byId).forEach(rows => {
+    const tp1   = rows.find(r => r.outcome === 'tp1');
+    const tp2   = rows.find(r => r.outcome === 'tp2');
+    const trail = rows.find(r => r.outcome === 'trail');
+    const sl    = rows.find(r => r.outcome === 'sl');
+    const half2 = tp2 || trail;            // the closing half of a TP1 trade
+    if (tp1 && !half2) { nOpen++; return; } // TP1 hit, still trailing → open position
+    if (tp1 && half2) {                     // reached TP1, now closed
+      nTP1++; if (tp2) nTP2++;
+      closed.push({ r: (tp1.r_mult + half2.r_mult) / 2, t: half2.closed_at || 0 });
+    } else if (sl) {                        // full loss before TP1
+      nSL++;
+      closed.push({ r: sl.r_mult, t: sl.closed_at || 0 });
+    }
+  });
+
+  set('jActive', (s.active ?? 0) + nOpen); // pending/entered + trades still trailing
+  set('jTP1',    nTP1);
+  set('jTP2',    nTP2);
+  set('jSL',     nSL);
+  set('jTotal',  closed.length);
+
+  if (!closed.length) {
     ['jWinRate','jAvgRR','jDrawdown','jBest','jWorst'].forEach(id => set(id, '—'));
     document.getElementById('journalLog').innerHTML =
       '<div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No closed trades yet</div>';
     return;
   }
 
-  const wins   = realTrades.filter(j => j.r_mult > 0).length;
-  const winRate = (wins / realTrades.length * 100).toFixed(0);
-  const avgRR   = (realTrades.reduce((s,j) => s+j.r_mult, 0) / realTrades.length).toFixed(2);
-  const bestR   = Math.max(...realTrades.map(j => j.r_mult));
-  const worstR  = Math.min(...realTrades.map(j => j.r_mult));
+  const rVals   = closed.map(c => c.r);
+  const wins    = rVals.filter(r => r > 0).length;
+  const winRate = (wins / rVals.length * 100).toFixed(0);
+  const avgRR   = (rVals.reduce((a,r) => a + r, 0) / rVals.length).toFixed(2);
+  const bestR   = Math.max(...rVals);
+  const worstR  = Math.min(...rVals);
 
   const wr = document.getElementById('jWinRate');
-  if (wr) { wr.textContent = winRate+'%'; wr.style.color = wins/realTrades.length >= 0.5 ? 'var(--green)' : 'var(--red)'; }
+  if (wr) { wr.textContent = winRate+'%'; wr.style.color = wins/rVals.length >= 0.5 ? 'var(--green)' : 'var(--red)'; }
   const ar = document.getElementById('jAvgRR');
   if (ar) { ar.textContent = (+avgRR>=0?'+':'')+avgRR+'R'; ar.style.color = +avgRR>=0?'var(--green)':'var(--red)'; }
-  set('jBest',  '+'+bestR.toFixed(1)+'R');
+  set('jBest',  (bestR>=0?'+':'')+bestR.toFixed(1)+'R');
   set('jWorst', worstR.toFixed(1)+'R');
 
-  // ── Equity curve & drawdown ──────────────────────────────────────
+  // ── Equity curve & drawdown (chronological, position-level) ─────
+  const chrono = closed.slice().sort((a,b) => a.t - b.t);
   let equity=100, peak=100, maxDD=0; const ep=[100];
-  realTrades.forEach(j => {
-    equity = equity * (1 + j.r_mult * 0.01); ep.push(+equity.toFixed(2));
+  chrono.forEach(c => {
+    equity = equity * (1 + c.r * 0.01); ep.push(+equity.toFixed(2));
     if (equity > peak) peak = equity;
     const dd = (peak - equity) / peak * 100; if (dd > maxDD) maxDD = dd;
   });
@@ -1061,8 +1088,8 @@ function renderJournal() {
   ctx.beginPath(); ctx.strokeStyle = ep[ep.length-1]>=100?'#00e676':'#ff3d57'; ctx.lineWidth=1.5;
   ep.forEach((v,i) => i===0 ? ctx.moveTo(toX(i),toY(v)) : ctx.lineTo(toX(i),toY(v))); ctx.stroke();
 
-  // ── Trade log ───────────────────────────────────────────────────
-  document.getElementById('journalLog').innerHTML = realTrades.slice().reverse().slice(0,20).map(j => {
+  // ── Trade log — NEWEST 20 fills (journal is already newest-first) ─
+  document.getElementById('journalLog').innerHTML = fills.slice(0,20).map(j => {
     const won = j.r_mult > 0;
     const icon = j.outcome==='tp2'?'🎯':j.outcome==='tp1'?'✅':j.outcome==='trail'?'📈':'🛑';
     return `<div class="jlog-e ${won?'win':'loss'}">
