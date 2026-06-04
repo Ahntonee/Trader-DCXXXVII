@@ -760,11 +760,11 @@ function connectBinanceWS(pair, tf) {
 function renderSignals() {
   const wrap=document.getElementById('signalsWrap');
   const pairSigs=Object.values(signals)
-    .filter(s=>s.pair_id===activePair.id&&!['expired','sl_hit'].includes(s.status))
-    .sort((a,b)=>{
-      const rank=s=>['entered','tp1_hit','tp2_hit'].includes(s.status)?0:s.status==='pending'?1:2;
-      return rank(a)-rank(b)||(b.confidence-a.confidence);
-    });
+    // Only live signals remain in the tab — awaiting entry, in trade, or
+    // trailing. tp2_hit / sl_hit / expired are journaled and drop off.
+    .filter(s=>s.pair_id===activePair.id&&['pending','entered','tp1_hit'].includes(s.status))
+    // Newest signals stacked on top of older ones.
+    .sort((a,b)=>(b.detected_at||0)-(a.detected_at||0));
   if (!pairSigs.length) {
     wrap.innerHTML=`<div class="no-signals"><div style="font-size:20px;margin-bottom:12px;opacity:0.3">◈</div>NO ACTIVE SIGNALS<br><span style="font-size:9px;color:var(--muted2)">Server scans ${activePair.sym} every ~90s</span></div>`;
     return;
