@@ -389,13 +389,13 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         </div>
         <div class="gt-section-title">◉ PATTERN PERFORMANCE</div>
         <div class="logger-card">
-          <div class="logger-title">BACKTESTED WIN RATES</div>
+          <div class="logger-title">LIVE WIN RATES · CLOSED TRADES</div>
           <div class="pattern-stats-grid">
-            <div class="ps-item"><div class="ps-lbl">SIGNALS</div><div class="ps-val" id="logTotal" style="color:var(--accent)">0</div></div>
+            <div class="ps-item"><div class="ps-lbl">CLOSED</div><div class="ps-val" id="logTotal" style="color:var(--accent)">0</div></div>
             <div class="ps-item"><div class="ps-lbl">WIN RATE</div><div class="ps-val" id="logWinRate" style="color:var(--green)">—</div></div>
             <div class="ps-item"><div class="ps-lbl">AVG R</div><div class="ps-val" id="logAvgR" style="color:var(--gold)">—</div></div>
           </div>
-          <div class="pattern-rows" id="patternRows"><div style="font-size:9px;color:var(--muted);text-align:center;padding:16px;">No data yet — run backtest first</div></div>
+          <div class="pattern-rows" id="patternRows"><div style="font-size:9px;color:var(--muted);text-align:center;padding:16px;">No closed trades yet</div></div>
         </div>
       </div>
     </div>
@@ -519,6 +519,7 @@ function handleServerMessage(msg) {
     case 'journal_init': case 'journal_update':
       journal = msg.data||[];
       renderJournal();
+      renderPatternStats(); // pattern panel is journal-derived — keep in sync
       break;
     case 'summary_init':
       signalSummary = msg.data||{};
@@ -1118,17 +1119,51 @@ async function clearJournal() {
 // PATTERN STATS
 // ═══════════════════════════════════════════════════════════════
 function renderPatternStats() {
-  if (!patternStats.length) return;
-  const total=patternStats.reduce((s,r)=>s+r.count,0);
-  const wins=patternStats.reduce((s,r)=>s+r.wins,0);
-  const totalR=patternStats.reduce((s,r)=>s+r.total_r,0);
-  document.getElementById('logTotal').textContent=total;
-  document.getElementById('logWinRate').textContent=total>0?(wins/total*100).toFixed(0)+'%':'—';
-  document.getElementById('logAvgR').textContent=total>0?(totalR/total).toFixed(1)+'R':'—';
-  document.getElementById('patternRows').innerHTML=patternStats.slice(0,12).map(r=>{
-    const wr=r.win_rate||0; const wrPct=(wr*100).toFixed(0)+'%';
-    const cls=wr>=0.60?'good':wr>=0.45?'avg':'bad';
-    const fill=wr>=0.60?'var(--green)':wr>=0.45?'var(--gold)':'var(--red)';
+  // Position-level pattern performance, derived from the journal — same
+  // accounting as the Journal tab so every panel shows one set of numbers.
+  // (Backtest results have their own table in the Backtest tab.)
+  const fills = journal.filter(j => ['tp1','tp2','sl','trail'].includes(j.outcome));
+  const byId = {};
+  fills.forEach(j => { (byId[j.signal_id] = byId[j.signal_id] || []).push(j); });
+
+  const agg = {}; // `${pattern}|${tf}` → { pattern, tf, wins, count, totalR }
+  Object.values(byId).forEach(rows => {
+    const tp1   = rows.find(r => r.outcome === 'tp1');
+    const tp2   = rows.find(r => r.outcome === 'tp2');
+    const trail = rows.find(r => r.outcome === 'trail');
+    const sl    = rows.find(r => r.outcome === 'sl');
+    const half2 = tp2 || trail;
+    let r;
+    if (tp1 && !half2) return;                       // still trailing — open
+    else if (tp1 && half2) r = (tp1.r_mult + half2.r_mult) / 2;
+    else if (sl)           r = sl.r_mult;
+    else return;
+    const base = rows[0];
+    const key  = `${base.pattern}|${base.tf}`;
+    const a = agg[key] || (agg[key] = { pattern: base.pattern, tf: base.tf, wins: 0, count: 0, totalR: 0 });
+    a.count++; a.totalR += r; if (r > 0) a.wins++;
+  });
+
+  const list = Object.values(agg)
+    .map(a => ({ ...a, win_rate: a.count ? a.wins / a.count : 0, avg_r: a.count ? a.totalR / a.count : 0 }))
+    .sort((x, y) => y.count - x.count);
+
+  const total  = list.reduce((s, r) => s + r.count, 0);
+  const wins   = list.reduce((s, r) => s + r.wins, 0);
+  const totalR = list.reduce((s, r) => s + r.totalR, 0);
+  document.getElementById('logTotal').textContent   = total;
+  document.getElementById('logWinRate').textContent = total > 0 ? (wins / total * 100).toFixed(0) + '%' : '—';
+  document.getElementById('logAvgR').textContent    = total > 0 ? (totalR / total).toFixed(1) + 'R' : '—';
+
+  const rowsEl = document.getElementById('patternRows');
+  if (!list.length) {
+    rowsEl.innerHTML = '<div style="font-size:9px;color:var(--muted);text-align:center;padding:16px;">No closed trades yet</div>';
+    return;
+  }
+  rowsEl.innerHTML = list.slice(0, 12).map(r => {
+    const wr = r.win_rate || 0, wrPct = (wr * 100).toFixed(0) + '%';
+    const cls = wr >= 0.60 ? 'good' : wr >= 0.45 ? 'avg' : 'bad';
+    const fill = wr >= 0.60 ? 'var(--green)' : wr >= 0.45 ? 'var(--gold)' : 'var(--red)';
     return `<div class="pattern-row"><div class="pr-name" title="${r.pattern}">${r.pattern} [${r.tf}]</div><div class="pr-bar"><div class="pr-fill" style="width:${Math.round(wr*100)}%;background:${fill}"></div></div><div class="pr-rate ${cls}">${wrPct}</div><div class="pr-count">${r.count}× ${(r.avg_r||0).toFixed(1)}R</div></div>`;
   }).join('');
 }
@@ -1162,9 +1197,8 @@ function renderBacktestResults(results) {
     const cls=wr>=0.60?'good':wr>=0.50?'avg':'bad';
     return `<div class="bt-table-row"><div style="font-size:8px">${r.pattern}<span style="opacity:0.5;margin-left:4px">${r.tf}</span></div><div class="bt-wr ${cls}">${wrPct}</div><div style="color:var(--gold)">${(r.avg_r||0).toFixed(2)}R</div><div style="color:var(--muted)">${r.total_signals}</div></div>`;
   }).join('');
-  // Update pattern stats panel
-  patternStats=results;
-  renderPatternStats();
+  // Backtest results live in their own table above; the GT Zones pattern
+  // panel stays journal-derived (live performance), so it is not touched here.
 }
 
 // ═══════════════════════════════════════════════════════════════
