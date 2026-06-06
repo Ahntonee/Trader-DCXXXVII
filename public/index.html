@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>APEX TERMINAL v2 — Signal Engine</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='12' fill='%23080b12'/><path d='M32 11 L55 51 L9 51 Z' fill='none' stroke='%2300d4ff' stroke-width='5' stroke-linejoin='round'/><path d='M32 11 L41 27 L23 27 Z' fill='%23ffc947'/></svg>">
+<meta name="theme-color" content="#080b12">
 <script>
 (function() {
   const CDNS = [
@@ -268,6 +270,73 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .loader-ring{width:36px;height:36px;border:2px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin 0.9s linear infinite;margin:0 auto 12px;}
 @keyframes spin{to{transform:rotate(360deg);}}
 .loader-txt{font-size:10px;color:var(--muted);letter-spacing:2px;}
+
+/* ── Signal card: price-progress bar (SL → Entry → TP1 → TP2) ── */
+.sig-progress{margin:8px 0 4px;}
+.sig-prog-track{position:relative;height:6px;border-radius:3px;background:linear-gradient(90deg,rgba(255,61,87,0.35),rgba(255,201,71,0.25),rgba(0,230,118,0.35));overflow:visible;}
+.sig-prog-tick{position:absolute;top:-3px;width:1px;height:12px;background:var(--muted);opacity:0.6;}
+.sig-prog-tick.entry{background:var(--accent);opacity:0.9;}
+.sig-prog-marker{position:absolute;top:50%;width:9px;height:9px;border-radius:50%;background:#fff;border:2px solid var(--bg);transform:translate(-50%,-50%);box-shadow:0 0 6px rgba(255,255,255,0.6);transition:left 0.4s ease;}
+.sig-prog-labels{display:flex;justify-content:space-between;margin-top:3px;font-size:7px;letter-spacing:0.5px;color:var(--muted);}
+.sig-prog-labels span:nth-child(2){color:var(--accent);}
+.sig-prog-labels span:last-child{color:var(--green);}
+
+/* ── Pending: distance to entry + expiry countdown ── */
+.sig-pending-meta{display:flex;gap:6px;margin:6px 0;}
+.sig-chip{flex:1;display:flex;flex-direction:column;gap:1px;padding:5px 8px;border-radius:4px;background:var(--bg);border:1px solid var(--border2);}
+.sig-chip .sc-lbl{font-size:7px;letter-spacing:1px;color:var(--muted);}
+.sig-chip .sc-val{font-size:11px;font-weight:700;}
+.sig-chip.near .sc-val{color:var(--green);}
+.sig-chip.far .sc-val{color:var(--text2);}
+.sig-chip.expiry .sc-val{color:var(--gold);}
+.sig-chip.expiry.soon .sc-val{color:var(--red);}
+
+/* ── Copy levels button ── */
+.copy-levels-btn{width:100%;margin-top:6px;padding:6px;border:1px solid var(--border2);border-radius:4px;background:rgba(0,212,255,0.04);color:var(--accent);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:1px;cursor:pointer;transition:all 0.15s;}
+.copy-levels-btn:hover{background:rgba(0,212,255,0.12);border-color:var(--accent);}
+.copy-levels-btn.copied{background:rgba(0,230,118,0.12);border-color:var(--green);color:var(--green);}
+
+/* ── Journal: direction split + extra stats ── */
+.dir-split{display:flex;gap:6px;margin-top:4px;}
+.dir-block{flex:1;padding:8px 10px;border-radius:5px;border:1px solid var(--border2);background:var(--panel2);}
+.dir-block .db-head{display:flex;align-items:center;gap:5px;font-size:9px;font-weight:700;letter-spacing:1px;margin-bottom:4px;}
+.dir-block.long .db-head{color:var(--green);}.dir-block.short .db-head{color:var(--red);}
+.dir-block .db-stats{display:flex;justify-content:space-between;font-size:11px;font-weight:700;}
+.dir-block .db-sub{font-size:8px;color:var(--muted);letter-spacing:0.5px;margin-top:2px;}
+.journal-toggle{display:flex;gap:3px;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:3px;margin-bottom:8px;}
+.jt-btn{flex:1;padding:5px;border:none;border-radius:3px;background:transparent;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:1px;cursor:pointer;transition:all 0.15s;}
+.jt-btn.active{background:var(--accent);color:var(--bg);}
+
+/* ── Always-visible mini stat strip ── */
+.mini-strip{display:flex;align-items:center;gap:14px;padding:4px 12px;background:var(--bg);border-bottom:1px solid var(--border);font-size:9px;letter-spacing:0.5px;flex-shrink:0;overflow-x:auto;white-space:nowrap;}
+.mini-strip .ms-item{display:flex;align-items:center;gap:5px;color:var(--muted);}
+.mini-strip .ms-item b{font-weight:700;font-size:10px;}
+.mini-strip .ms-pos b{color:var(--accent);}
+.mini-strip .ms-today.pos b{color:var(--green);}.mini-strip .ms-today.neg b{color:var(--red);}
+.mini-strip .ms-cum.pos b{color:var(--green);}.mini-strip .ms-cum.neg b{color:var(--red);}
+.mini-strip .ms-sess b{color:var(--gold);}
+.mini-strip .ms-sep{color:var(--muted2);}
+
+/* ── Low-data tag on pattern rows ── */
+.pattern-row.lowdata{opacity:0.5;}
+.pattern-row .pr-lowdata{font-size:7px;color:var(--gold);border:1px solid rgba(255,201,71,0.3);border-radius:2px;padding:0 3px;letter-spacing:0.5px;}
+
+/* ── Mobile responsiveness ── */
+@media (max-width: 820px){
+  .workspace{flex-direction:column;}
+  .right-panel{width:100%!important;border-left:none;border-top:1px solid var(--border);max-height:46vh;}
+  .chart-section{min-height:42vh;}
+  .topbar{flex-wrap:wrap;height:auto;padding:6px 10px;gap:8px;}
+  .topbar-center{order:3;width:100%;justify-content:flex-start;overflow-x:auto;}
+  .session-bar{flex-wrap:wrap;}
+  .mini-strip{gap:10px;}
+}
+@media (max-width: 480px){
+  .logo{font-size:12px;letter-spacing:2px;}
+  .chart-stats{display:none;}
+  .dir-split{flex-direction:column;}
+  .stat-grid{grid-template-columns:1fr 1fr;}
+}
 </style>
 </head>
 <body style="display:flex;flex-direction:column;height:100%;">
@@ -306,6 +375,18 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 </div>
 
 <div class="watchbar" id="watchbar"></div>
+
+<div class="mini-strip" id="miniStrip">
+  <div class="ms-item ms-pos">◆ OPEN <b id="msOpen">0</b></div>
+  <span class="ms-sep">·</span>
+  <div class="ms-item ms-today"><span>TODAY</span> <b id="msToday">—</b></div>
+  <span class="ms-sep">·</span>
+  <div class="ms-item ms-cum"><span>ALL-TIME</span> <b id="msCum">—</b></div>
+  <span class="ms-sep">·</span>
+  <div class="ms-item ms-wr"><span>WIN RATE</span> <b id="msWR">—</b></div>
+  <span class="ms-sep">·</span>
+  <div class="ms-item ms-sess">⚡ <b id="msSess">—</b></div>
+</div>
 
 <div class="workspace" style="flex:1;overflow:hidden;min-height:0;">
   <div class="chart-section">
@@ -418,6 +499,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 
     <div class="tab-content" id="tab-journal">
       <div class="journal-wrap">
+        <div class="journal-toggle">
+          <button class="jt-btn active" data-jview="all" onclick="setJournalView('all')">ALL-TIME</button>
+          <button class="jt-btn" data-jview="today" onclick="setJournalView('today')">TODAY</button>
+        </div>
         <div class="stat-grid">
           <div class="stat-card"><div class="stat-lbl">SIGNALS FIRED</div><div class="stat-val" id="jFired">0</div></div>
           <div class="stat-card"><div class="stat-lbl">ACTIVE NOW</div><div class="stat-val acc" id="jActive">0</div></div>
@@ -433,6 +518,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
           <div class="stat-card"><div class="stat-lbl">EXPIRED</div><div class="stat-val" id="jExpired">0</div></div>
           <div class="stat-card"><div class="stat-lbl">BEST TRADE</div><div class="stat-val pos" id="jBest">—</div></div>
           <div class="stat-card"><div class="stat-lbl">WORST TRADE</div><div class="stat-val neg" id="jWorst">—</div></div>
+        </div>
+        <div class="dir-split">
+          <div class="dir-block long"><div class="db-head">▲ LONG</div><div class="db-stats"><span id="jLongWR">—</span><span id="jLongR" style="color:var(--green)">—</span></div><div class="db-sub" id="jLongN">0 trades</div></div>
+          <div class="dir-block short"><div class="db-head">▼ SHORT</div><div class="db-stats"><span id="jShortWR">—</span><span id="jShortR" style="color:var(--green)">—</span></div><div class="db-sub" id="jShortN">0 trades</div></div>
+        </div>
+        <div class="stat-grid" style="margin-top:4px">
+          <div class="stat-card"><div class="stat-lbl">CUMULATIVE R</div><div class="stat-val pos" id="jCumR">—</div></div>
+          <div class="stat-card"><div class="stat-lbl">CURRENT STREAK</div><div class="stat-val" id="jStreak">—</div></div>
         </div>
         <div class="equity-wrap">
           <div class="equity-lbl">EQUITY CURVE<button onclick="clearJournal()" style="font-size:8px;padding:2px 7px;border:1px solid var(--border);border-radius:3px;background:none;color:var(--muted);font-family:'JetBrains Mono',monospace;cursor:pointer;letter-spacing:1px;" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">CLEAR</button></div>
@@ -460,6 +553,7 @@ let signals  = {};   // id → signal object (received from server)
 let journal  = [];
 let signalSummary = {};
 let patternStats = [];
+let journalView = 'all';   // 'all' | 'today' — journal stats scope
 let showChannel = false, showSMC = true;
 let indicators  = { ema:true, bb:false, rsi:false, macd:false };
 let allPairs    = { crypto:[], forex:[] };
@@ -815,6 +909,36 @@ function buildSignalCard(s) {
   const tfBadge=s.tf?s.tf.toUpperCase():'';
   const cpBadge=s.candle_pattern?`<span class="cp-badge ${s.dir==='long'?'bull':'bear'}">🕯 ${s.candle_pattern}</span>`:'';
 
+  // ── #1 Price-progress bar: SL (0%) → Entry → TP1 → TP2 (100%) ──
+  let progressHtml='';
+  if (isActive && entry && sl && tp1 && tp2) {
+    const span = s.dir==='long' ? (tp2 - sl) : (sl - tp2);
+    const pos  = x => span ? Math.max(0, Math.min(100, (s.dir==='long' ? (x - sl) : (sl - x)) / span * 100)) : 0;
+    const px   = s.latestPrice;
+    const marker = px ? `<div class="sig-prog-marker" style="left:${pos(px).toFixed(1)}%" title="price ${fmt(px,dec)}"></div>` : '';
+    progressHtml = `<div class="sig-progress"><div class="sig-prog-track">
+        <div class="sig-prog-tick entry" style="left:${pos(entry).toFixed(1)}%"></div>
+        <div class="sig-prog-tick" style="left:${pos(tp1).toFixed(1)}%"></div>${marker}
+      </div><div class="sig-prog-labels"><span>SL</span><span>ENTRY · TP1</span><span>TP2</span></div></div>`;
+  }
+
+  // ── #3 / #4 Pending: distance-to-entry + expiry countdown ──
+  let pendingMetaHtml='';
+  if (s.status==='pending') {
+    const px = s.latestPrice;
+    const distVal = (px && entry) ? (Math.abs(px-entry)/entry*100) : null;
+    const near = distVal!=null && distVal <= 0.5;
+    const distHtml = `<div class="sig-chip ${distVal==null?'far':near?'near':'far'}"><div class="sc-lbl">DISTANCE TO ENTRY</div><div class="sc-val" id="dist-${s.id}">${distVal!=null?distVal.toFixed(2)+'%':'—'}</div></div>`;
+    let expHtml='';
+    if (s.expires_at) {
+      const ms = s.expires_at - Date.now();
+      expHtml = `<div class="sig-chip expiry ${ms<=20*60*1000?'soon':''}"><div class="sc-lbl">EXPIRES IN</div><div class="sc-val" id="exp-${s.id}">${fmtDuration(ms)}</div></div>`;
+    }
+    pendingMetaHtml = `<div class="sig-pending-meta">${distHtml}${expHtml}</div>`;
+  }
+
+  const copyBtn = `<button class="copy-levels-btn" onclick="copyLevels('${s.id}',event)">📋 COPY LEVELS TO EXCHANGE</button>`;
+
   return `<div class="sig-card ${s.dir} ${isClosed?'closed':''} ${isActive?'active-trade':''}">
     <div class="sig-head">
       <div class="sig-dir ${s.dir}">${s.dir==='long'?'▲ LONG':'▼ SHORT'} · ${s.sym}</div>
@@ -825,6 +949,8 @@ function buildSignalCard(s) {
     </div>
     <div class="sig-pattern">📐 ${s.pattern} ${cpBadge} ${adxBadge} ${histWRBadge} ${mtfBadge}</div>
     ${pnlHtml}
+    ${progressHtml}
+    ${pendingMetaHtml}
     <div class="sig-levels-main">
       <div class="sig-level-row entry-row">
         <div class="slr-label">ENTRY ZONE</div>
@@ -848,7 +974,7 @@ function buildSignalCard(s) {
       <div>⏰ Valid: <span>${s.tf==='15m'?'2 hrs':s.tf==='1h'?'6 hrs':s.tf==='4h'?'16 hrs':'3 days'}</span></div>
     </div>
     ${buildSizingBlock(s)}
-    <div class="sig-exchange-note">📋 Copy these levels to any exchange — Binance · Bybit · KuCoin · Coinex</div>
+    ${copyBtn}
     <div class="sig-status-bar ${s.status}">${statusText}</div>
   </div>`;
 }
@@ -891,10 +1017,41 @@ function updateSignalLivePnL(pairId, price) {
   Object.values(signals).forEach(s=>{
     if (s.pair_id===pairId) s.latestPrice=price;
   });
-  if (activePair.id===pairId && Object.values(signals).some(s=>s.pair_id===pairId&&['entered','tp1_hit'].includes(s.status))) {
+  if (activePair.id===pairId && Object.values(signals).some(s=>s.pair_id===pairId&&['pending','entered','tp1_hit'].includes(s.status))) {
     renderSignals();
   }
+  updateMiniStrip();
 }
+
+// ── Frontend display helpers (display only — no engine impact) ──
+function fmtDuration(ms){
+  if (ms<=0) return 'expired';
+  const m=Math.floor(ms/60000), h=Math.floor(m/60), d=Math.floor(h/24);
+  if (d>0) return `${d}d ${h%24}h`;
+  return h>0 ? `${h}h ${m%60}m` : `${m}m`;
+}
+
+function copyLevels(id, ev){
+  if (ev) ev.stopPropagation();
+  const s=signals[id]; if(!s) return;
+  const dec=s.dec||activePair.dec||4;
+  const txt=`${s.sym} ${s.dir.toUpperCase()} · ${s.pattern} [${s.tf}]\nEntry: ${fmt(s.entry,dec)}\nStop:  ${fmt(s.sl,dec)}\nTP1:   ${fmt(s.tp1,dec)}${s.tp2?`\nTP2:   ${fmt(s.tp2,dec)}`:''}`;
+  const done=()=>{ const b=ev&&ev.target.closest('.copy-levels-btn'); if(b){const o=b.textContent;b.classList.add('copied');b.textContent='✓ COPIED';setTimeout(()=>{b.classList.remove('copied');b.textContent=o;},1600);} };
+  if (navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(()=>fallbackCopy(txt,done));
+  else fallbackCopy(txt,done);
+}
+function fallbackCopy(txt,done){ try{const ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);done&&done();}catch(e){showAlert('Clipboard blocked by browser','sl');} }
+
+// Tick the pending-signal countdowns in place (no full re-render → no flicker)
+function updateLiveSignalBits(){
+  Object.values(signals).forEach(s=>{
+    if (s.status!=='pending' || !s.expires_at) return;
+    const exp=document.getElementById('exp-'+s.id);
+    if (exp){ const ms=s.expires_at-Date.now(); exp.textContent=fmtDuration(ms); const chip=exp.closest('.sig-chip'); if(chip) chip.classList.toggle('soon', ms<=20*60*1000); }
+  });
+  updateMiniStrip(); // keep session label + today's R fresh
+}
+setInterval(updateLiveSignalBits, 20000);
 
 // ═══════════════════════════════════════════════════════════════
 // SIGNAL CHART LINES
@@ -1010,87 +1167,109 @@ async function switchPair(p) {
 // ═══════════════════════════════════════════════════════════════
 // JOURNAL
 // ═══════════════════════════════════════════════════════════════
-function renderJournal() {
-  // ── Signal summary (server-side counts) ─────────────────────────
-  const s = signalSummary;
-  const set = (id, v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
-  set('jFired',   s.total_fired ?? 0);
-  set('jExpired', s.expired     ?? 0);
-
-  // ── Closed-trade stats — scored at the POSITION level ───────────
-  // A single trade can write up to TWO journal rows: a TP1 partial
-  // (50% booked at +1.5R) plus its closing half (TP2 or trailed out).
-  // To keep counters honest we group rows by signal_id and score each
-  // unique position once. Guarantees: TP1 ≥ TP2, and closed ≤ fired.
+// Group journal rows into unique closed POSITIONS. Shared by the Journal
+// tab, the pattern panel, and the mini strip so every number agrees.
+function computeClosedPositions(){
   const fills = journal.filter(j => ['tp1','tp2','sl','trail'].includes(j.outcome));
   const byId = {};
   fills.forEach(j => { (byId[j.signal_id] = byId[j.signal_id] || []).push(j); });
-
-  const closed = [];                       // { r, t } per fully-closed position
-  let nTP1 = 0, nTP2 = 0, nSL = 0, nOpen = 0;
+  const closed = []; let open = 0;
   Object.values(byId).forEach(rows => {
-    const tp1   = rows.find(r => r.outcome === 'tp1');
-    const tp2   = rows.find(r => r.outcome === 'tp2');
-    const trail = rows.find(r => r.outcome === 'trail');
-    const sl    = rows.find(r => r.outcome === 'sl');
-    const half2 = tp2 || trail;            // the closing half of a TP1 trade
-    if (tp1 && !half2) { nOpen++; return; } // TP1 hit, still trailing → open position
-    if (tp1 && half2) {                     // reached TP1, now closed
-      nTP1++; if (tp2) nTP2++;
-      closed.push({ r: (tp1.r_mult + half2.r_mult) / 2, t: half2.closed_at || 0 });
-    } else if (sl) {                        // full loss before TP1
-      nSL++;
-      closed.push({ r: sl.r_mult, t: sl.closed_at || 0 });
-    }
+    const tp1=rows.find(r=>r.outcome==='tp1'), tp2=rows.find(r=>r.outcome==='tp2'),
+          trail=rows.find(r=>r.outcome==='trail'), sl=rows.find(r=>r.outcome==='sl');
+    const half2=tp2||trail, dir=rows[0].dir;
+    if (tp1 && !half2) { open++; return; }                 // still trailing → open
+    if (tp1 && half2) closed.push({ r:(tp1.r_mult+half2.r_mult)/2, t:half2.closed_at||0, dir, type: tp2?'tp2':'trail' });
+    else if (sl)      closed.push({ r:sl.r_mult, t:sl.closed_at||0, dir, type:'sl' });
   });
+  return { closed, open, fills };
+}
 
-  set('jActive', (s.active ?? 0) + nOpen); // pending/entered + trades still trailing
-  set('jTP1',    nTP1);
-  set('jTP2',    nTP2);
-  set('jSL',     nSL);
-  set('jTotal',  closed.length);
+function setJournalView(v){
+  journalView = v;
+  document.querySelectorAll('.jt-btn').forEach(b=>b.classList.toggle('active', b.dataset.jview===v));
+  renderJournal();
+}
 
-  if (!closed.length) {
-    ['jWinRate','jAvgRR','jDrawdown','jBest','jWorst'].forEach(id => set(id, '—'));
+const _isToday = t => { const d=new Date(t); return !isNaN(d) && d.toISOString().slice(0,10)===new Date().toISOString().slice(0,10); };
+
+function renderJournal() {
+  const s = signalSummary;
+  const set = (id, v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
+  const { closed: allClosed, open: nOpen, fills } = computeClosedPositions();
+
+  set('jFired',   s.total_fired ?? 0);
+  set('jExpired', s.expired     ?? 0);
+  set('jActive',  (s.active ?? 0) + nOpen);  // pending/entered + still-trailing
+
+  // Today filter applies to the closed-trade view
+  const view = journalView==='today' ? allClosed.filter(c=>_isToday(c.t)) : allClosed;
+
+  set('jTP1', view.filter(c=>c.type!=='sl').length);  // reached TP1 (cumulative)
+  set('jTP2', view.filter(c=>c.type==='tp2').length);
+  set('jSL',  view.filter(c=>c.type==='sl').length);
+  set('jTotal', view.length);
+
+  // ── #5 Direction split ──────────────────────────────────────────
+  const splitOf = arr => { const n=arr.length, w=arr.filter(c=>c.r>0).length, sumR=arr.reduce((a,c)=>a+c.r,0); return { wr:n?Math.round(w/n*100):0, avgR:n?sumR/n:0, n }; };
+  const setSplit = (key, st) => {
+    set('j'+key+'WR', st.n? st.wr+'%' : '—');
+    const rEl=document.getElementById('j'+key+'R'); if(rEl){ rEl.textContent = st.n? (st.avgR>=0?'+':'')+st.avgR.toFixed(2)+'R' : '—'; rEl.style.color = st.avgR>=0?'var(--green)':'var(--red)'; }
+    set('j'+key+'N', st.n+' trade'+(st.n===1?'':'s'));
+  };
+  setSplit('Long',  splitOf(view.filter(c=>c.dir==='long')));
+  setSplit('Short', splitOf(view.filter(c=>c.dir==='short')));
+
+  if (!view.length) {
+    ['jWinRate','jAvgRR','jDrawdown','jBest','jWorst','jCumR','jStreak'].forEach(id => set(id, '—'));
     document.getElementById('journalLog').innerHTML =
-      '<div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No closed trades yet</div>';
+      '<div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No closed trades '+(journalView==='today'?'today':'yet')+'</div>';
+    updateMiniStrip();
     return;
   }
 
-  const rVals   = closed.map(c => c.r);
-  const wins    = rVals.filter(r => r > 0).length;
-  const winRate = (wins / rVals.length * 100).toFixed(0);
-  const avgRR   = (rVals.reduce((a,r) => a + r, 0) / rVals.length).toFixed(2);
-  const bestR   = Math.max(...rVals);
-  const worstR  = Math.min(...rVals);
+  const rVals  = view.map(c=>c.r);
+  const wins   = rVals.filter(r=>r>0).length;
+  const winRate= (wins/rVals.length*100).toFixed(0);
+  const avgRR  = (rVals.reduce((a,r)=>a+r,0)/rVals.length).toFixed(2);
+  const cumR   = rVals.reduce((a,r)=>a+r,0);
+  const bestR  = Math.max(...rVals), worstR = Math.min(...rVals);
 
-  const wr = document.getElementById('jWinRate');
-  if (wr) { wr.textContent = winRate+'%'; wr.style.color = wins/rVals.length >= 0.5 ? 'var(--green)' : 'var(--red)'; }
-  const ar = document.getElementById('jAvgRR');
-  if (ar) { ar.textContent = (+avgRR>=0?'+':'')+avgRR+'R'; ar.style.color = +avgRR>=0?'var(--green)':'var(--red)'; }
-  set('jBest',  (bestR>=0?'+':'')+bestR.toFixed(1)+'R');
-  set('jWorst', worstR.toFixed(1)+'R');
+  const wr=document.getElementById('jWinRate');
+  if (wr){ wr.textContent=winRate+'%'; wr.style.color = wins/rVals.length>=0.5?'var(--green)':'var(--red)'; }
+  const ar=document.getElementById('jAvgRR');
+  if (ar){ ar.textContent=(+avgRR>=0?'+':'')+avgRR+'R'; ar.style.color=+avgRR>=0?'var(--green)':'var(--red)'; }
+  set('jBest',(bestR>=0?'+':'')+bestR.toFixed(1)+'R');
+  set('jWorst',worstR.toFixed(1)+'R');
+
+  // ── #6 Cumulative R + current streak ────────────────────────────
+  const cr=document.getElementById('jCumR');
+  if (cr){ cr.textContent=(cumR>=0?'+':'')+cumR.toFixed(1)+'R'; cr.style.color=cumR>=0?'var(--green)':'var(--red)'; }
+  const desc = view.slice().sort((a,b)=>b.t-a.t);
+  let streak=0, sWin=null;
+  for (const c of desc){ const w=c.r>0; if(sWin===null){sWin=w;streak=1;} else if(w===sWin) streak++; else break; }
+  const stEl=document.getElementById('jStreak');
+  if (stEl){ stEl.textContent = sWin===null?'—':(streak+(sWin?'W 🔥':'L')); stEl.style.color = sWin?'var(--green)':'var(--red)'; }
 
   // ── Equity curve & drawdown (chronological, position-level) ─────
-  const chrono = closed.slice().sort((a,b) => a.t - b.t);
+  const chrono = view.slice().sort((a,b)=>a.t-b.t);
   let equity=100, peak=100, maxDD=0; const ep=[100];
-  chrono.forEach(c => {
-    equity = equity * (1 + c.r * 0.01); ep.push(+equity.toFixed(2));
-    if (equity > peak) peak = equity;
-    const dd = (peak - equity) / peak * 100; if (dd > maxDD) maxDD = dd;
-  });
+  chrono.forEach(c=>{ equity=equity*(1+c.r*0.01); ep.push(+equity.toFixed(2)); if(equity>peak)peak=equity; const dd=(peak-equity)/peak*100; if(dd>maxDD)maxDD=dd; });
   set('jDrawdown', maxDD.toFixed(1)+'%');
-  const canvas = document.getElementById('equityChart'); if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  canvas.width = canvas.offsetWidth||260; canvas.height = canvas.offsetHeight||80;
-  const W=canvas.width, H=canvas.height, minV=Math.min(...ep), maxV=Math.max(...ep), range=maxV-minV||1;
-  const toX = i => (i/(ep.length-1))*W, toY = v => H-((v-minV)/range)*H*0.8-H*0.1;
-  ctx.clearRect(0,0,W,H);
-  ctx.beginPath(); ctx.strokeStyle = ep[ep.length-1]>=100?'#00e676':'#ff3d57'; ctx.lineWidth=1.5;
-  ep.forEach((v,i) => i===0 ? ctx.moveTo(toX(i),toY(v)) : ctx.lineTo(toX(i),toY(v))); ctx.stroke();
+  const canvas=document.getElementById('equityChart');
+  if (canvas){
+    const ctx=canvas.getContext('2d');
+    canvas.width=canvas.offsetWidth||260; canvas.height=canvas.offsetHeight||80;
+    const W=canvas.width,H=canvas.height,minV=Math.min(...ep),maxV=Math.max(...ep),range=maxV-minV||1;
+    const toX=i=>(i/(ep.length-1))*W, toY=v=>H-((v-minV)/range)*H*0.8-H*0.1;
+    ctx.clearRect(0,0,W,H);
+    ctx.beginPath(); ctx.strokeStyle=ep[ep.length-1]>=100?'#00e676':'#ff3d57'; ctx.lineWidth=1.5;
+    ep.forEach((v,i)=>i===0?ctx.moveTo(toX(i),toY(v)):ctx.lineTo(toX(i),toY(v))); ctx.stroke();
+  }
 
-  // ── Trade log — NEWEST 20 fills (journal is already newest-first) ─
-  document.getElementById('journalLog').innerHTML = fills.slice(0,20).map(j => {
+  // ── Trade log — newest 20 fills (respects Today filter) ─────────
+  const logFills = journalView==='today' ? fills.filter(j=>_isToday(j.closed_at)) : fills;
+  document.getElementById('journalLog').innerHTML = logFills.slice(0,20).map(j => {
     const won = j.r_mult > 0;
     const icon = j.outcome==='tp2'?'🎯':j.outcome==='tp1'?'✅':j.outcome==='trail'?'📈':'🛑';
     return `<div class="jlog-e ${won?'win':'loss'}">
@@ -1101,6 +1280,27 @@ function renderJournal() {
       <span class="jlog-pnl ${won?'pos':'neg'}">${won?'+':''}${j.r_mult.toFixed(2)}R</span>
     </div>`;
   }).join('');
+
+  updateMiniStrip();
+}
+
+// ── #10 Always-visible mini stat strip ──────────────────────────
+function updateMiniStrip(){
+  const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+  const openCount = Object.values(signals).filter(s=>['pending','entered','tp1_hit'].includes(s.status)).length;
+  const { closed } = computeClosedPositions();
+  const todayR = closed.filter(c=>_isToday(c.t)).reduce((a,c)=>a+c.r,0);
+  const cumR   = closed.reduce((a,c)=>a+c.r,0);
+  const wins   = closed.filter(c=>c.r>0).length;
+  const wr     = closed.length ? Math.round(wins/closed.length*100) : null;
+  set('msOpen', openCount);
+  const td=document.getElementById('msToday'); if(td){ td.textContent=(todayR>=0?'+':'')+todayR.toFixed(1)+'R'; td.parentElement.className='ms-item ms-today '+(todayR>=0?'pos':'neg'); }
+  const cu=document.getElementById('msCum'); if(cu){ cu.textContent=(cumR>=0?'+':'')+cumR.toFixed(1)+'R'; cu.parentElement.className='ms-item ms-cum '+(cumR>=0?'pos':'neg'); }
+  set('msWR', wr==null?'—':wr+'%');
+  const h=new Date().getUTCHours(); const sess=[];
+  if (h>=7&&h<16) sess.push('London'); if (h>=13&&h<22) sess.push('New York');
+  if (h>=0&&h<9) sess.push('Tokyo'); if (h>=22||h<7) sess.push('Sydney');
+  set('msSess', (sess.includes('London')&&sess.includes('New York'))?'LON-NY OVERLAP':(sess[0]||'CLOSED'));
 }
 
 async function clearJournal() {
@@ -1164,7 +1364,9 @@ function renderPatternStats() {
     const wr = r.win_rate || 0, wrPct = (wr * 100).toFixed(0) + '%';
     const cls = wr >= 0.60 ? 'good' : wr >= 0.45 ? 'avg' : 'bad';
     const fill = wr >= 0.60 ? 'var(--green)' : wr >= 0.45 ? 'var(--gold)' : 'var(--red)';
-    return `<div class="pattern-row"><div class="pr-name" title="${r.pattern}">${r.pattern} [${r.tf}]</div><div class="pr-bar"><div class="pr-fill" style="width:${Math.round(wr*100)}%;background:${fill}"></div></div><div class="pr-rate ${cls}">${wrPct}</div><div class="pr-count">${r.count}× ${(r.avg_r||0).toFixed(1)}R</div></div>`;
+    const low = r.count < 5;  // #9 too few trades to trust
+    const lowTag = low ? `<span class="pr-lowdata" title="Only ${r.count} closed trades — small sample">LOW DATA</span>` : '';
+    return `<div class="pattern-row${low?' lowdata':''}"><div class="pr-name" title="${r.pattern}">${r.pattern} [${r.tf}]</div><div class="pr-bar"><div class="pr-fill" style="width:${Math.round(wr*100)}%;background:${fill}"></div></div>${lowTag}<div class="pr-rate ${cls}">${wrPct}</div><div class="pr-count">${r.count}× ${(r.avg_r||0).toFixed(1)}R</div></div>`;
   }).join('');
 }
 
