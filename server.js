@@ -106,6 +106,23 @@ function aggregateCandles(candles, factor) {
 
 const CANDLE_LIMIT = { '15m': 200, '1h': 200, '4h': 150, '1d': 100 };
 
+// ── Source circuit breaker ──────────────────────────────────────────
+// A geo-blocked source (e.g. Binance/Bybit in some regions) wastes
+// several seconds timing out on EVERY call. After 3 consecutive failures
+// we skip it for a 2-min cooldown, then probe once more. This keeps a
+// working source (CryptoCompare here) serving fast instead of every
+// fetch dragging through dead endpoints first. Auto-recovers when a
+// source comes back (e.g. on a cloud host where Binance is reachable).
+const _src = {}; // name → { fails, until }
+function srcSkip(name){ const s=_src[name]; return !!(s && s.until > Date.now()); }
+function srcDown(name){ const s=_src[name]||(_src[name]={fails:0,until:0}); if(++s.fails>=3){ s.until=Date.now()+120000; } }
+function srcUp(name){ _src[name]={fails:0,until:0}; }
+async function trySource(name, fn){
+  if (srcSkip(name)) return null;
+  try { const r = await fn(); if (r) { srcUp(name); return r; } srcDown(name); return null; }
+  catch { srcDown(name); return null; }
+}
+
 // One retry on full-chain failure — most timeouts are transient network
 // blips; a short pause then a second pass usually succeeds.
 async function getBinanceKlines(symbol, interval, limit) {
@@ -119,16 +136,17 @@ async function getBinanceKlines(symbol, interval, limit) {
 
 async function fetchKlinesChain(symbol, interval, limit) {
   // 1. Binance
-  try {
+  let r = await trySource('binance', async () => {
     const url = `${BINANCE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const res = await fetch(url, { timeout: 8000 });
     if (!res.ok) throw new Error(`Binance ${res.status}`);
     const data = await res.json();
     return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
-  } catch { }
+  });
+  if (r) return r;
 
   // 2. Bybit
-  try {
+  r = await trySource('bybit', async () => {
     const btf = BYBIT_TF[interval] || '60';
     const url = `${BYBIT}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&limit=${limit}`;
     const res = await fetch(url, { timeout: 10000 });
@@ -137,11 +155,12 @@ async function fetchKlinesChain(symbol, interval, limit) {
     if (data.retCode !== 0) throw new Error(`Bybit: ${data.retMsg}`);
     const candles = [...(data.result?.list || [])].reverse()
       .map(c => ({ time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
-    if (candles.length) return candles;
-  } catch { }
+    return candles.length ? candles : null;
+  });
+  if (r) return r;
 
   // 3. CryptoCompare
-  try {
+  r = await trySource('cryptocompare', async () => {
     const [ep, agg] = CC_TF[interval] || ['histohour', 1];
     const fsym = ccSym(symbol);
     const url = `${CC_BASE}/${ep}?fsym=${fsym}&tsym=USDT&limit=${limit}&aggregate=${agg}`;
@@ -151,60 +170,74 @@ async function fetchKlinesChain(symbol, interval, limit) {
     if (data.Response !== 'Success') throw new Error(`CC: ${data.Message}`);
     const cc = (data.Data?.Data || []).filter(c => c.close > 0)
       .map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volumefrom }));
-    if (cc.length) return cc;
-  } catch { }
+    return cc.length ? cc : null;
+  });
+  if (r) return r;
 
-  // 4. Yahoo Finance
-  const yf = yfSym(symbol);
-  const yfRes = await fetch(
-    `${YAHOO}/${yf}?interval=${YF_INT[interval]||'1h'}&range=${YF_RANGE[interval]||'30d'}&includePrePost=false`,
-    { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } }
-  );
-  if (!yfRes.ok) throw new Error(`YF ${yfRes.status}`);
-  const yfData = await yfRes.json();
-  const yfR = yfData.chart?.result?.[0];
-  if (!yfR) throw new Error('YF: no data');
-  const ts = yfR.timestamp || [], q = yfR.indicators?.quote?.[0] || {};
-  const raw = ts.map((t, i) => ({ time: t, open: q.open?.[i]||0, high: q.high?.[i]||0,
-    low: q.low?.[i]||0, close: q.close?.[i]||0, volume: q.volume?.[i]||0 })).filter(c => c.close > 0);
-  return aggregateCandles(raw, YF_AGG[interval] || 1).slice(-limit);
+  // 4. Yahoo Finance (last resort)
+  r = await trySource('yahoo', async () => {
+    const yf = yfSym(symbol);
+    const yfRes = await fetch(
+      `${YAHOO}/${yf}?interval=${YF_INT[interval]||'1h'}&range=${YF_RANGE[interval]||'30d'}&includePrePost=false`,
+      { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } }
+    );
+    if (!yfRes.ok) throw new Error(`YF ${yfRes.status}`);
+    const yfData = await yfRes.json();
+    const yfR = yfData.chart?.result?.[0];
+    if (!yfR) throw new Error('YF: no data');
+    const ts = yfR.timestamp || [], q = yfR.indicators?.quote?.[0] || {};
+    const raw = ts.map((t, i) => ({ time: t, open: q.open?.[i]||0, high: q.high?.[i]||0,
+      low: q.low?.[i]||0, close: q.close?.[i]||0, volume: q.volume?.[i]||0 })).filter(c => c.close > 0);
+    const out = aggregateCandles(raw, YF_AGG[interval] || 1).slice(-limit);
+    return out.length ? out : null;
+  });
+  if (r) return r;
+
+  throw new Error(`all sources failed for ${symbol} ${interval}`);
 }
 
 async function getBinanceTicker(symbol) {
   // 1. Binance
-  try {
+  let r = await trySource('binance', async () => {
     const res = await fetch(`${BINANCE}/api/v3/ticker/24hr?symbol=${symbol}`, { timeout: 5000 });
     if (!res.ok) throw new Error(`Ticker ${res.status}`);
     return res.json();
-  } catch { }
+  });
+  if (r) return r;
 
   // 2. Bybit
-  try {
+  r = await trySource('bybit', async () => {
     const res = await fetch(`${BYBIT}/v5/market/tickers?category=spot&symbol=${symbol}`, { timeout: 5000 });
     if (!res.ok) throw new Error(`Bybit ticker ${res.status}`);
     const data = await res.json();
     const t = data.result?.list?.[0];
-    if (t) return { lastPrice: t.lastPrice, priceChangePercent: (+t.price24hPcnt * 100).toFixed(2) };
-  } catch { }
+    return t ? { lastPrice: t.lastPrice, priceChangePercent: (+t.price24hPcnt * 100).toFixed(2) } : null;
+  });
+  if (r) return r;
 
   // 3. CryptoCompare
-  try {
+  r = await trySource('cryptocompare', async () => {
     const fsym = ccSym(symbol);
     const res = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${fsym}&tsyms=USDT`, { timeout: 5000 });
     if (!res.ok) throw new Error(`CC ticker ${res.status}`);
     const data = await res.json();
     const info = data.RAW?.[fsym]?.USDT;
-    if (info) return { lastPrice: info.PRICE.toString(), priceChangePercent: info.CHANGEPCT24HOUR.toFixed(2) };
-  } catch { }
+    return info ? { lastPrice: info.PRICE.toString(), priceChangePercent: info.CHANGEPCT24HOUR.toFixed(2) } : null;
+  });
+  if (r) return r;
 
-  // 4. Yahoo Finance
-  const yf = yfSym(symbol);
-  const yfRes = await fetch(`${YAHOO}/${yf}?interval=1d&range=2d`, { timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!yfRes.ok) throw new Error(`YF ticker ${yfRes.status}`);
-  const yfData = await yfRes.json();
-  const meta = yfData.chart?.result?.[0]?.meta;
-  if (!meta?.regularMarketPrice) throw new Error('YF: no price');
-  return { lastPrice: meta.regularMarketPrice.toString(), priceChangePercent: (meta.regularMarketChangePercent || 0).toFixed(2) };
+  // 4. Yahoo Finance (last resort)
+  r = await trySource('yahoo', async () => {
+    const yf = yfSym(symbol);
+    const yfRes = await fetch(`${YAHOO}/${yf}?interval=1d&range=2d`, { timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!yfRes.ok) throw new Error(`YF ticker ${yfRes.status}`);
+    const yfData = await yfRes.json();
+    const meta = yfData.chart?.result?.[0]?.meta;
+    return meta?.regularMarketPrice ? { lastPrice: meta.regularMarketPrice.toString(), priceChangePercent: (meta.regularMarketChangePercent || 0).toFixed(2) } : null;
+  });
+  if (r) return r;
+
+  throw new Error(`all ticker sources failed for ${symbol}`);
 }
 
 async function getForexKlines(symbol, interval, limit = 200) {
