@@ -1,8 +1,18 @@
 'use strict';
 const Database = require('better-sqlite3');
 const path = require('path');
+const fs = require('fs');
 
-const db = new Database(path.join(__dirname, 'apex.db'));
+// DB location is configurable so it can live on a PERSISTENT disk.
+// Default: alongside the app (fine for local / a VPS where the disk
+// persists). On an ephemeral host (Render free tier) point DB_PATH at a
+// mounted persistent disk, e.g. DB_PATH=/var/data/apex.db, so journal
+// history survives restarts and redeploys.
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'apex.db');
+try { fs.mkdirSync(path.dirname(DB_PATH), { recursive: true }); } catch {}
+console.log(`[DB] Using database at: ${DB_PATH}`);
+
+const db = new Database(DB_PATH);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS signals (
