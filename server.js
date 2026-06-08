@@ -106,7 +106,18 @@ function aggregateCandles(candles, factor) {
 
 const CANDLE_LIMIT = { '15m': 200, '1h': 200, '4h': 150, '1d': 100 };
 
+// One retry on full-chain failure — most timeouts are transient network
+// blips; a short pause then a second pass usually succeeds.
 async function getBinanceKlines(symbol, interval, limit) {
+  try {
+    return await fetchKlinesChain(symbol, interval, limit);
+  } catch (e) {
+    await new Promise(r => setTimeout(r, 1200));
+    return await fetchKlinesChain(symbol, interval, limit);
+  }
+}
+
+async function fetchKlinesChain(symbol, interval, limit) {
   // 1. Binance
   try {
     const url = `${BINANCE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
@@ -147,7 +158,7 @@ async function getBinanceKlines(symbol, interval, limit) {
   const yf = yfSym(symbol);
   const yfRes = await fetch(
     `${YAHOO}/${yf}?interval=${YF_INT[interval]||'1h'}&range=${YF_RANGE[interval]||'30d'}&includePrePost=false`,
-    { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } }
+    { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } }
   );
   if (!yfRes.ok) throw new Error(`YF ${yfRes.status}`);
   const yfData = await yfRes.json();
@@ -749,5 +760,18 @@ async function start() {
     console.log(`   Twelve Data: ${TWELVE_KEY && TWELVE_KEY !== 'your_twelve_data_key_here' ? '✓ configured' : '✗ not set (forex disabled)'}\n`);
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// CRASH GUARDS — a long-running market server must survive transient
+// network failures. A timed-out fetch or stray rejection is logged and
+// swallowed so the process keeps running and auto-recovers when the
+// connection returns, instead of exiting back to the shell.
+// ═══════════════════════════════════════════════════════════════════
+process.on('unhandledRejection', (reason) => {
+  console.warn('[unhandledRejection]', reason && reason.message ? reason.message : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.warn('[uncaughtException]', err && err.message ? err.message : err);
+});
 
 start().catch(console.error);
