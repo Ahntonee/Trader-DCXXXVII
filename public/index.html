@@ -787,9 +787,10 @@ async function loadPair(pair, tf) {
     const chEl=document.getElementById('pairChg');
     chEl.textContent=change?(fmtPct(change)):'—'; chEl.className='pair-chg '+(change>=0?'up':'dn');
     if (ticker) {
-      document.getElementById('stat24h').textContent=fmt(+ticker.highPrice,pair.dec);
-      document.getElementById('stat24l').textContent=fmt(+ticker.lowPrice,pair.dec);
-      document.getElementById('statVol').textContent=fmtVol(+ticker.quoteVolume);
+      const h=+ticker.highPrice, l=+ticker.lowPrice, v=+ticker.quoteVolume;
+      document.getElementById('stat24h').textContent=isFinite(h)?fmt(h,pair.dec):'—';
+      document.getElementById('stat24l').textContent=isFinite(l)?fmt(l,pair.dec):'—';
+      document.getElementById('statVol').textContent=isFinite(v)&&v>0?fmtVol(v):'—';
     }
     updateHTFBiasDisplay(cs);
     candleSeries.setData(cs);

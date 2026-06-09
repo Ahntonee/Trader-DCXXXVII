@@ -211,7 +211,8 @@ async function getBinanceTicker(symbol) {
     if (!res.ok) throw new Error(`Bybit ticker ${res.status}`);
     const data = await res.json();
     const t = data.result?.list?.[0];
-    return t ? { lastPrice: t.lastPrice, priceChangePercent: (+t.price24hPcnt * 100).toFixed(2) } : null;
+    return t ? { lastPrice: t.lastPrice, priceChangePercent: (+t.price24hPcnt * 100).toFixed(2),
+      highPrice: t.highPrice24h, lowPrice: t.lowPrice24h, quoteVolume: t.turnover24h } : null;
   });
   if (r) return r;
 
@@ -222,7 +223,8 @@ async function getBinanceTicker(symbol) {
     if (!res.ok) throw new Error(`CC ticker ${res.status}`);
     const data = await res.json();
     const info = data.RAW?.[fsym]?.USDT;
-    return info ? { lastPrice: info.PRICE.toString(), priceChangePercent: info.CHANGEPCT24HOUR.toFixed(2) } : null;
+    return info ? { lastPrice: info.PRICE.toString(), priceChangePercent: info.CHANGEPCT24HOUR.toFixed(2),
+      highPrice: info.HIGH24HOUR, lowPrice: info.LOW24HOUR, quoteVolume: info.VOLUME24HOURTO } : null;
   });
   if (r) return r;
 
@@ -233,7 +235,8 @@ async function getBinanceTicker(symbol) {
     if (!yfRes.ok) throw new Error(`YF ticker ${yfRes.status}`);
     const yfData = await yfRes.json();
     const meta = yfData.chart?.result?.[0]?.meta;
-    return meta?.regularMarketPrice ? { lastPrice: meta.regularMarketPrice.toString(), priceChangePercent: (meta.regularMarketChangePercent || 0).toFixed(2) } : null;
+    return meta?.regularMarketPrice ? { lastPrice: meta.regularMarketPrice.toString(), priceChangePercent: (meta.regularMarketChangePercent || 0).toFixed(2),
+      highPrice: meta.regularMarketDayHigh, lowPrice: meta.regularMarketDayLow, quoteVolume: meta.regularMarketVolume } : null;
   });
   if (r) return r;
 
