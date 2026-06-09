@@ -273,6 +273,16 @@ function broadcast(msg) {
   wss.clients.forEach(ws => { if (ws.readyState === 1) ws.send(str); });
 }
 
+// All-time summary merged with today-scoped counts (fired/expired today).
+// "Today" = since UTC midnight, matching the client's UTC date filter.
+function summaryPayload() {
+  const s = db.getSignalSummary.get();
+  const now = new Date();
+  const todayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const t = db.getTodaySummary.get({ todayStart });
+  return { ...s, fired_today: t.fired_today || 0, expired_today: t.expired_today || 0 };
+}
+
 function broadcastSessions() {
   broadcast({
     type:    'sessions',
@@ -293,7 +303,7 @@ wss.on('connection', ws => {
     ws.send(JSON.stringify({ type: 'stats_init', data: stats }));
     const btResults = db.getBacktestResults.all();
     if (btResults.length) ws.send(JSON.stringify({ type: 'backtest_results', data: btResults }));
-    ws.send(JSON.stringify({ type: 'summary_init', data: db.getSignalSummary.get() }));
+    ws.send(JSON.stringify({ type: 'summary_init', data: summaryPayload() }));
     // Send current session state immediately on connect
     ws.send(JSON.stringify({
       type: 'sessions', active: engine.getMarketSessions(),
@@ -336,7 +346,7 @@ async function processNewSignal(sig) {
       adx: sig.adx || null,
     });
     broadcast({ type: 'new_signal', data: sig });
-    broadcast({ type: 'summary_init', data: db.getSignalSummary.get() });
+    broadcast({ type: 'summary_init', data: summaryPayload() });
     const tgMsg = tg.formatSignal(sig);
     await tg.sendMessage(tgMsg);
     console.log(`[SIGNAL] ${sig.dir.toUpperCase()} ${sig.sym} ${sig.tf} | ${sig.pattern} | Conf: ${sig.confidence}%${sig.mtf_stack ? ' | ✦ MTF' : ''} | ADX: ${sig.adx}`);
@@ -385,7 +395,7 @@ function handleSignalUpdate(sig, updates) {
         wins: 1, losses: 0, total_r: 1.5, count: 1, win_rate: 1, avg_r: 1.5,
       });
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
-      broadcast({ type: 'summary_init', data: db.getSignalSummary.get() });
+      broadcast({ type: 'summary_init', data: summaryPayload() });
       tg.sendMessage(tg.formatTPHit(sig, 'tp1'));
       console.log(`[TRAIL] ${sig.sym} TP1 hit — 50% locked +1.5R, trailing stop armed at breakeven`);
     }
@@ -434,7 +444,7 @@ function handleSignalUpdate(sig, updates) {
         win_rate: rMult > 0 ? 1 : 0, avg_r: rMult,
       });
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
-      broadcast({ type: 'summary_init', data: db.getSignalSummary.get() });
+      broadcast({ type: 'summary_init', data: summaryPayload() });
 
       if (updates.status === 'sl_hit') tg.sendMessage(tg.formatSLHit(sig));
       else tg.sendMessage(tg.formatTPHit(sig, outcome));
@@ -670,7 +680,7 @@ app.delete('/api/journal', (req, res) => {
   try {
     db.clearJournal.run();
     broadcast({ type: 'journal_update', data: [] });
-    broadcast({ type: 'summary_init', data: db.getSignalSummary.get() });
+    broadcast({ type: 'summary_init', data: summaryPayload() });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

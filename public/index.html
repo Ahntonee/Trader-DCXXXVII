@@ -1198,9 +1198,10 @@ function renderJournal() {
   const set = (id, v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
   const { closed: allClosed, open: nOpen, fills } = computeClosedPositions();
 
-  set('jFired',   s.total_fired ?? 0);
-  set('jExpired', s.expired     ?? 0);
-  set('jActive',  (s.active ?? 0) + nOpen);  // pending/entered + still-trailing
+  // Today view scopes fired/expired to today (server-supplied); All-time uses totals.
+  set('jFired',   journalView==='today' ? (s.fired_today   ?? 0) : (s.total_fired ?? 0));
+  set('jExpired', journalView==='today' ? (s.expired_today ?? 0) : (s.expired     ?? 0));
+  set('jActive',  (s.active ?? 0) + nOpen);  // "now" snapshot — same in both views
 
   // Today filter applies to the closed-trade view
   const view = journalView==='today' ? allClosed.filter(c=>_isToday(c.t)) : allClosed;

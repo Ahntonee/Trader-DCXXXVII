@@ -164,6 +164,16 @@ const getSignalSummary = db.prepare(`
   FROM signals
 `);
 
+// Today-scoped counts (detected since the given UTC-midnight ms timestamp).
+// Used by the journal TODAY view for fired/expired, which the client
+// can't derive on its own (expired signals never reach the journal).
+const getTodaySummary = db.prepare(`
+  SELECT
+    SUM(CASE WHEN detected_at >= @todayStart THEN 1 ELSE 0 END)                          AS fired_today,
+    SUM(CASE WHEN status='expired' AND detected_at >= @todayStart THEN 1 ELSE 0 END)     AS expired_today
+  FROM signals
+`);
+
 module.exports = {
   insertSignal,
   updateSignalStatus,
@@ -180,5 +190,6 @@ module.exports = {
   insertBacktestResult,
   getBacktestResults,
   getSignalSummary,
+  getTodaySummary,
   db,
 };
