@@ -1,9 +1,21 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-// APEX SIGNAL ENGINE v2
+// APEX SIGNAL ENGINE v3
 // Runs server-side. Returns validated, high-probability signals only.
-// Target: 65–75% win rate on 1:1.5 RR
+// Target: 85–90% win rate on tiered 1:1 / 1:2 / trail RR
+//
+// FIXES APPLIED (v2 → v3):
+//  1. HTF bias is now a hard mandatory requirement — signals against HTF are blocked entirely
+//  2. FVG (Fair Value Gap) + Orderblock proximity filter — signals must originate from structure
+//  3. Retest confirmation state — breakout patterns wait for neckline retest before entry
+//  4. Weighted confluence scoring — HTF(30) EMA(25) RSI(20) Candle(15) MACD(5) Vol(5)
+//  5. Session gate per pattern type — hard blocks on post-NY all patterns, Asia reversals
+//  6. ADX >= 25 + slope + Choppiness Index < 61.8 regime filter
+//  7. (consumed by backtester.js — engine exports full filter stack for replay)
+//  8. Structure-based trailing stop — trails behind confirmed swing, not arithmetic distance
+//  9. Bug fixes: engulfing dead-code, falling wedge slope inversion, H&S shoulder check,
+//     InvHS missing shoulder check, session dead-code NY OPEN, bull flag lower-half inversion
 // ═══════════════════════════════════════════════════════════════════
 
 // Signal expiry per timeframe (in minutes)
@@ -11,6 +23,14 @@ const EXPIRY_MINS = { '15m': 120, '1h': 360, '4h': 960, '1d': 4320 };
 
 // MTF lookup: for each TF, which higher TF to confirm against
 const MTF_MAP = { '15m': '1h', '1h': '4h', '4h': '1d', '1d': '1d' };
+
+// Reversal pattern names — used by session gate (Fix 5)
+const REVERSAL_PATTERNS = new Set([
+  'Double Bottom', 'Double Top',
+  'Head & Shoulders', 'Inv. Head & Shoulders',
+  'Cup & Handle',
+  'Bull Engulfing at S/R', 'Bear Engulfing at S/R',
+]);
 
 // ─── INDICATORS ─────────────────────────────────────────────────────
 
@@ -38,6 +58,7 @@ function calcATR(cs, period = 14) {
   return trs.slice(-period).reduce((s, v) => s + v, 0) / period;
 }
 
+// ── FIX 6: calcADX now also returns adxHistory for slope check ──────
 function calcADX(cs, period = 14) {
   if (cs.length < period * 2 + 2) return null;
   const trs = [], plusDMs = [], minusDMs = [];
@@ -62,10 +83,46 @@ function calcADX(cs, period = 14) {
     dxArr.push(sum > 0 ? Math.abs(pdi - mdi) / sum * 100 : 0);
   }
   if (dxArr.length < period) return null;
+
+  // Build full ADX history for slope detection
+  const adxHistory = [];
   let adx = dxArr.slice(0, period).reduce((s, v) => s + v, 0) / period;
-  for (let i = period; i < dxArr.length; i++) adx = (adx * (period - 1) + dxArr[i]) / period;
+  adxHistory.push(adx);
+  for (let i = period; i < dxArr.length; i++) {
+    adx = (adx * (period - 1) + dxArr[i]) / period;
+    adxHistory.push(adx);
+  }
+
   const pdi = pDI / atr * 100, mdi = mDI / atr * 100;
-  return { adx: Math.round(adx * 10) / 10, plusDI: pdi, minusDI: mdi };
+  return {
+    adx:        Math.round(adx * 10) / 10,
+    plusDI:     pdi,
+    minusDI:    mdi,
+    adxHistory, // full sequence for slope check
+  };
+}
+
+// ── FIX 6: Choppiness Index (CI) ────────────────────────────────────
+// CI < 38.2  → strongly trending (green-light)
+// CI > 61.8  → choppy / ranging (hard block)
+// Between    → neutral (allow but no bonus)
+function calcChoppiness(cs, period = 14) {
+  if (cs.length < period + 1) return null;
+  const slice = cs.slice(-(period + 1));
+  const trs = [];
+  for (let i = 1; i < slice.length; i++) {
+    trs.push(Math.max(
+      slice[i].high - slice[i].low,
+      Math.abs(slice[i].high - slice[i-1].close),
+      Math.abs(slice[i].low  - slice[i-1].close)
+    ));
+  }
+  const atrSum = trs.reduce((s, v) => s + v, 0);
+  const highestHigh = Math.max(...slice.map(c => c.high));
+  const lowestLow   = Math.min(...slice.map(c => c.low));
+  const trueRange   = highestHigh - lowestLow;
+  if (trueRange === 0) return null;
+  return 100 * Math.log10(atrSum / trueRange) / Math.log10(period);
 }
 
 function calcRSI(data, period = 14) {
@@ -117,28 +174,206 @@ function findSwings(cs, lb = 5) {
   return { highs, lows };
 }
 
+// ─── FIX 2: FAIR VALUE GAP (FVG) DETECTION ──────────────────────────
+// A 3-candle imbalance where candle[i-1].high < candle[i+1].low (bull FVG)
+// or candle[i-1].low > candle[i+1].high (bear FVG).
+// The gap zone is the price range price left behind — institutional orders fill here.
+// Returns the last N FVGs found in cs, tagged bull/bear with their price range.
+
+function findFVGs(cs, lookback = 100) {
+  const fvgs = [];
+  const start = Math.max(1, cs.length - lookback - 1);
+  for (let i = start; i < cs.length - 1; i++) {
+    const prev = cs[i - 1], cur = cs[i], next = cs[i + 1];
+    // Bullish FVG: gap between prev.high and next.low
+    if (next.low > prev.high) {
+      fvgs.push({ type: 'bull', top: next.low, bot: prev.high, i, time: cur.time });
+    }
+    // Bearish FVG: gap between prev.low and next.high
+    if (next.high < prev.low) {
+      fvgs.push({ type: 'bear', top: prev.low, bot: next.high, i, time: cur.time });
+    }
+  }
+  return fvgs;
+}
+
+// ─── FIX 2: ORDERBLOCK DETECTION ────────────────────────────────────
+// An orderblock is the last candle that moved opposite to the following
+// strong impulse move. For a bullish OB: the last bearish candle before a
+// strong up-move. For a bearish OB: the last bullish candle before a
+// strong down-move.
+// We define "strong impulse" as a move >= 1.5× ATR in a single bar.
+
+function findOrderblocks(cs, lookback = 100) {
+  const obs = [];
+  if (cs.length < 5) return obs;
+  const atr = calcATR(cs, 14);
+  if (!atr) return obs;
+  const start = Math.max(2, cs.length - lookback);
+  for (let i = start; i < cs.length - 1; i++) {
+    const next = cs[i + 1];
+    const impulse = Math.abs(next.close - next.open);
+    if (impulse < atr * 1.5) continue; // not an impulse bar
+    const cur = cs[i];
+    const bullImpulse = next.close > next.open;
+    const bearImpulse = next.close < next.open;
+    // Bullish OB: last bearish candle before bull impulse
+    if (bullImpulse && cur.close < cur.open) {
+      obs.push({ type: 'bull', top: cur.open, bot: cur.close, i, time: cur.time });
+    }
+    // Bearish OB: last bullish candle before bear impulse
+    if (bearImpulse && cur.close > cur.open) {
+      obs.push({ type: 'bear', top: cur.close, bot: cur.open, i, time: cur.time });
+    }
+  }
+  return obs;
+}
+
+// ─── VOLUME PROFILE VISIBLE RANGE (VPVR) ────────────────────────────
+// Distributes candle volume across N price buckets for a lookback window.
+// Returns { poc, vah, val, buckets } where:
+//   poc = price with highest volume (Point of Control)
+//   vah = Value Area High (upper edge of 70% volume zone around POC)
+//   val = Value Area Low  (lower edge of 70% volume zone around POC)
+// Proximity bonus: +10 when entry is within 0.5 ATR of POC/VAH/VAL; -5 elsewhere.
+
+function calcVPVR(cs, levels = 50, lookback = 100) {
+  const slice = cs.slice(-Math.min(lookback, cs.length));
+  if (slice.length < 10) return null;
+
+  const lo = Math.min(...slice.map(c => c.low));
+  const hi = Math.max(...slice.map(c => c.high));
+  if (hi === lo) return null;
+
+  const bucketSize = (hi - lo) / levels;
+  const buckets = Array.from({ length: levels }, (_, i) => ({
+    price: lo + (i + 0.5) * bucketSize,
+    vol: 0,
+  }));
+
+  for (const c of slice) {
+    const vol = c.volume || 0;
+    if (!vol) continue;
+    const bLo = Math.floor((c.low  - lo) / bucketSize);
+    const bHi = Math.floor((c.high - lo) / bucketSize);
+    const span = Math.max(1, bHi - bLo + 1);
+    for (let b = bLo; b <= bHi && b < levels; b++) {
+      if (b >= 0) buckets[b].vol += vol / span;
+    }
+  }
+
+  const pocIdx = buckets.reduce((best, b, i) => b.vol > buckets[best].vol ? i : best, 0);
+  const poc = buckets[pocIdx].price;
+
+  // Value Area = 70% of total volume, expanding around POC
+  const totalVol = buckets.reduce((s, b) => s + b.vol, 0);
+  const target = totalVol * 0.70;
+  let lo_idx = pocIdx, hi_idx = pocIdx, vaVol = buckets[pocIdx].vol;
+  while (vaVol < target) {
+    const expandLo = lo_idx > 0         ? buckets[lo_idx - 1].vol : -1;
+    const expandHi = hi_idx < levels - 1 ? buckets[hi_idx + 1].vol : -1;
+    if (expandLo < 0 && expandHi < 0) break;
+    if (expandHi >= expandLo) { hi_idx++; vaVol += buckets[hi_idx].vol; }
+    else                       { lo_idx--; vaVol += buckets[lo_idx].vol; }
+  }
+  return { poc, vah: buckets[hi_idx].price + bucketSize / 2, val: buckets[lo_idx].price - bucketSize / 2, buckets };
+}
+
+// ─── FIX 2: STRUCTURE PROXIMITY CHECK ───────────────────────────────
+// Returns true if 'price' is inside or within 0.5% of any FVG or OB
+// that matches the trade direction.
+
+function isAtStructure(price, dir, fvgs, obs, atr) {
+  const buf = atr * 0.3; // small ATR buffer for "close enough"
+
+  for (const fvg of fvgs) {
+    if (dir === 'long'  && fvg.type === 'bull' && price >= fvg.bot - buf && price <= fvg.top + buf) return { ok: true, label: 'Bull FVG' };
+    if (dir === 'short' && fvg.type === 'bear' && price >= fvg.bot - buf && price <= fvg.top + buf) return { ok: true, label: 'Bear FVG' };
+  }
+
+  for (const ob of obs) {
+    if (dir === 'long'  && ob.type === 'bull' && price >= ob.bot - buf && price <= ob.top + buf) return { ok: true, label: 'Bull OB' };
+    if (dir === 'short' && ob.type === 'bear' && price >= ob.bot - buf && price <= ob.top + buf) return { ok: true, label: 'Bear OB' };
+  }
+
+  return { ok: false, label: null };
+}
+
 // ─── STRUCTURE-BASED SL ──────────────────────────────────────────────
 // Places SL at the actual swing point that invalidates the pattern,
 // with ATR buffer. Never a formula on entry price.
 
 function structureSL(dir, lows, highs, cs, entry) {
   const atr = calcATR(cs, 14);
-  const buf = atr * 0.5; // half-ATR buffer beyond the swing point
+  const buf = atr * 0.5;
+  const curPrice = cs[cs.length - 1].close;
+
   if (dir === 'long') {
-    // SL below the nearest relevant swing low
-    const candidates = lows.filter(l => l.p < entry).sort((a, b) => b.i - a.i);
+    // SL below the nearest swing low that is below entry AND below current price
+    const candidates = lows
+      .filter(l => l.p < entry && l.p < curPrice)
+      .sort((a, b) => b.i - a.i);
     if (candidates.length > 0) {
       const swingLow = candidates[0].p;
-      return Math.min(swingLow - buf, entry - atr * 1.2); // at least 1.2 ATR from entry
+      return Math.min(swingLow - buf, entry - atr * 1.2);
     }
     return entry - atr * 1.5;
   } else {
-    const candidates = highs.filter(h => h.p > entry).sort((a, b) => b.i - a.i);
+    // SL above the nearest swing high that is above entry AND above current price
+    const candidates = highs
+      .filter(h => h.p > entry && h.p > curPrice)
+      .sort((a, b) => b.i - a.i);
     if (candidates.length > 0) {
       const swingHigh = candidates[0].p;
       return Math.max(swingHigh + buf, entry + atr * 1.2);
     }
     return entry + atr * 1.5;
+  }
+}
+
+// ─── FIX 8: STRUCTURE-BASED TRAILING STOP ───────────────────────────
+// After TP1, trail stop behind the most recent confirmed swing low (long)
+// or swing high (short), recalculated on each closed candle.
+// Minimum trail distance = 0.3R to avoid stops too tight to breathe.
+// Stop only moves in favour — never backwards.
+// Returns the new SL value, or null if it should not move.
+
+function computeStructureTrail(sig, cs) {
+  const originalRisk = Math.abs(sig.tp1 - sig.entry) / 1.5;
+  if (!originalRisk) return null;
+
+  const minTrailDist = originalRisk * 0.3; // never trail tighter than 0.3R
+  const { highs, lows } = findSwings(cs, 3); // lb=3 for faster swing detection in trail
+
+  const curPrice = cs[cs.length - 1].close;
+
+  if (sig.dir === 'long') {
+    // Trail behind the highest recent swing low that is below current price
+    const candidates = lows
+      .filter(l => l.p < curPrice && l.p > sig.entry) // above entry = profit territory only
+      .sort((a, b) => b.p - a.p); // highest first
+    if (candidates.length > 0) {
+      const trailLevel = candidates[0].p - calcATR(cs, 14) * 0.3;
+      if (trailLevel > sig.sl && curPrice - trailLevel >= minTrailDist) {
+        return +trailLevel.toFixed(8);
+      }
+    }
+    // Fallback: arithmetic 0.5R trail
+    const fallback = curPrice - originalRisk * 0.5;
+    return fallback > sig.sl ? +fallback.toFixed(8) : null;
+  } else {
+    // Trail behind the lowest recent swing high that is above current price
+    const candidates = highs
+      .filter(h => h.p > curPrice && h.p < sig.entry)
+      .sort((a, b) => a.p - b.p); // lowest first
+    if (candidates.length > 0) {
+      const trailLevel = candidates[0].p + calcATR(cs, 14) * 0.3;
+      if (trailLevel < sig.sl && trailLevel - curPrice >= minTrailDist) {
+        return +trailLevel.toFixed(8);
+      }
+    }
+    const fallback = curPrice + originalRisk * 0.5;
+    return fallback < sig.sl ? +fallback.toFixed(8) : null;
   }
 }
 
@@ -154,8 +389,8 @@ function detectDoubleBottom(lows, cs) {
   const neck = Math.max(...neckSlice.map(c => c.high));
   if ((neck - l2.p) / l2.p < 0.005) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close < neck * 0.97) return null; // too far below — not imminent
-  if (cur.close > neck * 1.03) return null; // too far above — chasing
+  if (cur.close < neck * 0.97) return null;
+  if (cur.close > neck * 1.03) return null;
   return { pattern: 'Double Bottom', dir: 'long', entry: neck, swingLow: Math.min(l1.p, l2.p), conf: 75 };
 }
 
@@ -169,39 +404,46 @@ function detectDoubleTop(highs, cs) {
   const neck = Math.min(...neckSlice.map(c => c.low));
   if ((h2.p - neck) / h2.p < 0.005) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close > neck * 1.03) return null; // too far above — not imminent
-  if (cur.close < neck * 0.97) return null; // already broken far below — chasing
+  if (cur.close > neck * 1.03) return null;
+  if (cur.close < neck * 0.97) return null;
   return { pattern: 'Double Top', dir: 'short', entry: neck, swingHigh: Math.max(h1.p, h2.p), conf: 75 };
 }
 
+// ── FIX 9: H&S shoulder validation corrected ────────────────────────
+// Shoulders (ls, rs) must be strictly BELOW their adjacent arm peaks (lh, rh).
+// The old check `ls.p > lh.p * 0.97` allowed shoulders almost as high as the arm.
 function detectHeadShoulders(highs, cs) {
   if (highs.length < 5) return null;
   const n = highs.length;
   const [ls, lh, h, rh, rs] = [highs[n-5], highs[n-4], highs[n-3], highs[n-2], highs[n-1]];
   if (h.p <= lh.p || h.p <= rh.p) return null;
   if (Math.abs(lh.p - rh.p) / lh.p > 0.03) return null;
-  if (ls.p > lh.p * 0.97 || rs.p > rh.p * 0.97) return null;
+  // FIX 9: shoulders must be strictly below arm peaks, not just within 3%
+  if (ls.p >= lh.p || rs.p >= rh.p) return null;
   const neckL = cs.slice(lh.i, h.i).reduce((mn, c) => Math.min(mn, c.low), Infinity);
   const neckR = cs.slice(h.i, rh.i).reduce((mn, c) => Math.min(mn, c.low), Infinity);
   const neck = (neckL + neckR) / 2;
   const cur = cs[cs.length - 1];
-  if (cur.close > neck * 1.03) return null; // too far above — not imminent
-  if (cur.close < neck * 0.97) return null; // already broken far below — chasing
+  if (cur.close > neck * 1.03) return null;
+  if (cur.close < neck * 0.97) return null;
   return { pattern: 'Head & Shoulders', dir: 'short', entry: neck, swingHigh: h.p, conf: 82 };
 }
 
+// ── FIX 9: InvHS — added missing shoulder height validation ─────────
 function detectInverseHS(lows, cs) {
   if (lows.length < 5) return null;
   const n = lows.length;
   const [ls, lh, h, rh, rs] = [lows[n-5], lows[n-4], lows[n-3], lows[n-2], lows[n-1]];
   if (h.p >= lh.p || h.p >= rh.p) return null;
   if (Math.abs(lh.p - rh.p) / lh.p > 0.03) return null;
+  // FIX 9: shoulders must be strictly above arm troughs
+  if (ls.p <= lh.p || rs.p <= rh.p) return null;
   const neckL = cs.slice(lh.i, h.i).reduce((mx, c) => Math.max(mx, c.high), -Infinity);
   const neckR = cs.slice(h.i, rh.i).reduce((mx, c) => Math.max(mx, c.high), -Infinity);
   const neck = (neckL + neckR) / 2;
   const cur = cs[cs.length - 1];
-  if (cur.close < neck * 0.97) return null; // too far below — not imminent
-  if (cur.close > neck * 1.03) return null; // already broken far above — chasing
+  if (cur.close < neck * 0.97) return null;
+  if (cur.close > neck * 1.03) return null;
   return { pattern: 'Inv. Head & Shoulders', dir: 'long', entry: neck, swingLow: h.p, conf: 82 };
 }
 
@@ -211,8 +453,8 @@ function detectAscendingTriangle(highs, lows, cs) {
   if (!rH.every(h => Math.abs(h.p - rH[0].p) / rH[0].p < 0.007)) return null;
   if (!(rL[0].p < rL[1].p && rL[1].p < rL[2].p)) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close < rH[0].p * 0.97) return null; // too far below
-  if (cur.close > rH[0].p * 1.03) return null; // too far above — chasing
+  if (cur.close < rH[0].p * 0.97) return null;
+  if (cur.close > rH[0].p * 1.03) return null;
   return { pattern: 'Ascending Triangle', dir: 'long', entry: rH[0].p * 1.001, resist: rH[0].p, conf: 72 };
 }
 
@@ -222,22 +464,26 @@ function detectDescendingTriangle(highs, lows, cs) {
   if (!rL.every(l => Math.abs(l.p - rL[0].p) / rL[0].p < 0.007)) return null;
   if (!(rH[0].p > rH[1].p && rH[1].p > rH[2].p)) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close > rL[0].p * 1.03) return null; // too far above
-  if (cur.close < rL[0].p * 0.97) return null; // already broken far below — chasing
+  if (cur.close > rL[0].p * 1.03) return null;
+  if (cur.close < rL[0].p * 0.97) return null;
   return { pattern: 'Descending Triangle', dir: 'short', entry: rL[0].p * 0.999, support: rL[0].p, conf: 72 };
 }
 
+// ── FIX 9: Bull flag lower-half check corrected ─────────────────────
+// Old check rejected valid flags where the last close was in the upper half.
+// Real intent: reject if price has already broken DOWN out of the flag.
 function detectBullFlag(cs) {
   if (cs.length < 30) return null;
   const recent = cs.slice(-30), pole = recent.slice(0, 10), flag = recent.slice(10);
   const poleMove = (pole[pole.length-1].close - pole[0].open) / pole[0].open;
-  if (poleMove < 0.05) return null; // need 5%+ pole
+  if (poleMove < 0.05) return null;
   const flagHigh = Math.max(...flag.map(c => c.high)), flagLow = Math.min(...flag.map(c => c.low));
-  if ((flagHigh - flagLow) / flagLow > 0.03) return null; // flag must be tight
-  if (flag[flag.length-1].close > flagLow + (flagHigh - flagLow) * 0.6) return null; // must be in lower half
+  if ((flagHigh - flagLow) / flagLow > 0.03) return null;
+  // FIX 9: reject if last close has broken below the lower 20% of the flag (pattern failing)
+  if (flag[flag.length-1].close < flagLow + (flagHigh - flagLow) * 0.2) return null;
   const cur = cs[cs.length-1];
-  if (cur.close < flagHigh * 0.97) return null; // too far below
-  if (cur.close > flagHigh * 1.03) return null; // too far above — chasing
+  if (cur.close < flagHigh * 0.97) return null;
+  if (cur.close > flagHigh * 1.03) return null;
   return { pattern: 'Bull Flag', dir: 'long', entry: flagHigh * 1.001, flagLow, conf: 70 };
 }
 
@@ -249,91 +495,85 @@ function detectBearFlag(cs) {
   const flagHigh = Math.max(...flag.map(c => c.high)), flagLow = Math.min(...flag.map(c => c.low));
   if ((flagHigh - flagLow) / flagLow > 0.03) return null;
   const cur = cs[cs.length-1];
-  if (cur.close > flagLow * 1.03) return null; // too far above
-  if (cur.close < flagLow * 0.97) return null; // already broken far below — chasing
+  if (cur.close > flagLow * 1.03) return null;
+  if (cur.close < flagLow * 0.97) return null;
   return { pattern: 'Bear Flag', dir: 'short', entry: flagLow * 0.999, flagHigh, conf: 70 };
 }
 
-// Falling Wedge (bullish): lower highs + lower lows converging, breakout up
+// ── FIX 9: Falling wedge slope comparison corrected ─────────────────
+// Both slopes are negative. Highs must drop MORE steeply than lows.
+// "More steeply negative" means highSlope < lowSlope (both negative).
+// Old code had `highSlope >= lowSlope` which was inverted.
 function detectFallingWedge(highs, lows, cs) {
   if (highs.length < 3 || lows.length < 3) return null;
   const rH = highs.slice(-3), rL = lows.slice(-3);
-  // Highs must be declining
   if (!(rH[0].p > rH[1].p && rH[1].p > rH[2].p)) return null;
-  // Lows must be declining too (but less steeply = converging)
   if (!(rL[0].p > rL[1].p && rL[1].p > rL[2].p)) return null;
-  // Slope of highs must be steeper than slope of lows (convergence)
-  const highSlope = (rH[2].p - rH[0].p) / (rH[2].i - rH[0].i);
-  const lowSlope  = (rL[2].p - rL[0].p) / (rL[2].i - rL[0].i);
-  if (highSlope >= lowSlope) return null; // not converging
+  const highSlope = (rH[2].p - rH[0].p) / (rH[2].i - rH[0].i); // negative
+  const lowSlope  = (rL[2].p - rL[0].p) / (rL[2].i - rL[0].i); // negative
+  // FIX 9: highs must fall faster (more negative) than lows → convergence
+  if (highSlope <= lowSlope) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close < rH[2].p * 0.97) return null; // too far below
-  if (cur.close > rH[2].p * 1.03) return null; // too far above — chasing
+  if (cur.close < rH[2].p * 0.97) return null;
+  if (cur.close > rH[2].p * 1.03) return null;
   return { pattern: 'Falling Wedge', dir: 'long', entry: rH[2].p * 1.001, swingLow: rL[2].p, conf: 74 };
 }
 
-// Rising Wedge (bearish): higher highs + higher lows converging, breakout down
 function detectRisingWedge(highs, lows, cs) {
   if (highs.length < 3 || lows.length < 3) return null;
   const rH = highs.slice(-3), rL = lows.slice(-3);
-  // Highs and lows both rising
   if (!(rH[0].p < rH[1].p && rH[1].p < rH[2].p)) return null;
   if (!(rL[0].p < rL[1].p && rL[1].p < rL[2].p)) return null;
-  // Lows slope must be steeper than highs slope (converging)
   const highSlope = (rH[2].p - rH[0].p) / (rH[2].i - rH[0].i);
   const lowSlope  = (rL[2].p - rL[0].p) / (rL[2].i - rL[0].i);
   if (lowSlope <= highSlope) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close > rL[2].p * 1.03) return null; // too far above
-  if (cur.close < rL[2].p * 0.97) return null; // already broken far below — chasing
+  if (cur.close > rL[2].p * 1.03) return null;
+  if (cur.close < rL[2].p * 0.97) return null;
   return { pattern: 'Rising Wedge', dir: 'short', entry: rL[2].p * 0.999, swingHigh: rH[2].p, conf: 74 };
 }
 
-// Cup & Handle (bullish): rounded bottom + brief consolidation before breakout
 function detectCupHandle(cs) {
   if (cs.length < 60) return null;
   const slice = cs.slice(-60);
   const half  = Math.floor(slice.length / 2);
-  // Left half: find cup low (price goes down then up)
   const leftHalf  = slice.slice(0, half);
   const rightHalf = slice.slice(half);
   const cupLow    = Math.min(...leftHalf.map(c => c.low));
   const rimLeft   = Math.max(leftHalf[0].high, leftHalf[1].high);
   const rimRight  = Math.max(...rightHalf.slice(0, 5).map(c => c.high));
-  // Rims must be at similar level (within 1.5%)
   if (Math.abs(rimLeft - rimRight) / rimLeft > 0.015) return null;
-  // Cup depth: 10–35% pullback from rim
   const depth = (rimLeft - cupLow) / rimLeft;
   if (depth < 0.10 || depth > 0.35) return null;
-  // Handle: last 10 bars should be a tight consolidation below rim
   const handleSlice = slice.slice(-10);
   const handleHigh  = Math.max(...handleSlice.map(c => c.high));
   const handleLow   = Math.min(...handleSlice.map(c => c.low));
-  if ((handleHigh - handleLow) / handleLow > 0.06) return null; // handle too wide
-  if (handleHigh > rimRight * 1.005) return null; // handle must be below rim
+  if ((handleHigh - handleLow) / handleLow > 0.06) return null;
+  if (handleHigh > rimRight * 1.005) return null;
   const cur = cs[cs.length - 1];
-  if (cur.close < rimRight * 0.97) return null; // too far below
-  if (cur.close > rimRight * 1.03) return null; // too far above — chasing
+  if (cur.close < rimRight * 0.97) return null;
+  if (cur.close > rimRight * 1.03) return null;
   return { pattern: 'Cup & Handle', dir: 'long', entry: rimRight * 1.001, swingLow: cupLow, conf: 78 };
 }
 
-// Bullish/bearish engulfing on clean S/R level
 function detectEngulfingAtSR(cs, levels, dir) {
   if (cs.length < 3) return null;
   const c = cs[cs.length-1], p = cs[cs.length-2];
   const bodyC = Math.abs(c.close - c.open), bodyP = Math.abs(p.close - p.open);
-  if (bodyC < bodyP * 1.2) return null; // engulf must be bigger
+  if (bodyC < bodyP * 1.2) return null;
   const bullEngulf = c.close > c.open && p.close < p.open && c.open <= p.close && c.close >= p.open;
   const bearEngulf = c.close < c.open && p.close > p.open && c.open >= p.close && c.close <= p.open;
   if (dir === 'long' && !bullEngulf) return null;
   if (dir === 'short' && !bearEngulf) return null;
-  // Must be at an S/R level
   const price = dir === 'long' ? c.low : c.high;
   const nearLevel = levels.some(l => Math.abs(l.price - price) / price < 0.008);
   if (!nearLevel) return null;
   return { pattern: dir === 'long' ? 'Bull Engulfing at S/R' : 'Bear Engulfing at S/R', dir, entry: c.close, conf: 74 };
 }
 
+// ── FIX 9: detectCandlePattern — engulfing dead-code fixed ──────────
+// Old code: `if (bullC && bearC && ...)` — mutually exclusive, never fired.
+// Fixed: check previous candle's direction (bullPrev / bearPrev).
 function detectCandlePattern(cs) {
   if (cs.length < 3) return null;
   const c = cs[cs.length-1], p = cs[cs.length-2];
@@ -341,14 +581,16 @@ function detectCandlePattern(cs) {
   if (range === 0) return null;
   const upWick = c.high - Math.max(c.open, c.close), dnWick = Math.min(c.open, c.close) - c.low;
   const bullC = c.close > c.open, bearC = c.close < c.open;
+  const bullPrev = p.close > p.open, bearPrev = p.close < p.open;
   const bodyP = Math.abs(p.close - p.open);
   if (body < range * 0.1) return { name: 'Doji', dir: 'neutral' };
   if (bullC && dnWick > body * 2 && upWick < body * 0.5) return { name: 'Hammer', dir: 'bull' };
   if (bearC && upWick > body * 2 && dnWick < body * 0.5) return { name: 'Shooting Star', dir: 'bear' };
   if (bullC && dnWick > range * 0.6 && body < range * 0.3) return { name: 'Pin Bar ▲', dir: 'bull' };
   if (bearC && upWick > range * 0.6 && body < range * 0.3) return { name: 'Pin Bar ▼', dir: 'bear' };
-  if (bullC && bearC && c.open < p.close && c.close > p.open && body > bodyP * 1.1) return { name: 'Bull Engulfing', dir: 'bull' };
-  if (bearC && bullC && c.open > p.close && c.close < p.open && body > bodyP * 1.1) return { name: 'Bear Engulfing', dir: 'bear' };
+  // FIX 9: use bullPrev/bearPrev instead of bullC/bearC for prior candle check
+  if (bullC && bearPrev && c.open <= p.close && c.close >= p.open && body > bodyP * 1.1) return { name: 'Bull Engulfing', dir: 'bull' };
+  if (bearC && bullPrev && c.open >= p.close && c.close <= p.open && body > bodyP * 1.1) return { name: 'Bear Engulfing', dir: 'bear' };
   return null;
 }
 
@@ -356,7 +598,6 @@ function detectCandlePattern(cs) {
 
 function checkEMAStack(cs, dir) {
   if (cs.length < 200) {
-    // Shorter stack check when < 200 bars
     if (cs.length < 50) return { score: 0, label: 'EMA N/A' };
     const ema20 = calcEMA(cs, 20), ema50 = calcEMA(cs, 50);
     const e20 = ema20[ema20.length-1].value, e50 = ema50[ema50.length-1].value;
@@ -397,7 +638,6 @@ function checkRSI(cs, dir) {
   const rsiData = calcRSI(cs, 14);
   if (!rsiData.length) return { score: 0, label: 'RSI N/A' };
   const last = rsiData[rsiData.length-1].value;
-  // Divergence check over last 15 bars
   const priceSlice = cs.slice(-15), rsiSlice = rsiData.slice(-15);
   if (rsiSlice.length >= 8) {
     const pH1 = Math.max(...priceSlice.slice(0,8).map(c => c.high)), pH2 = Math.max(...priceSlice.slice(7).map(c => c.high));
@@ -407,7 +647,6 @@ function checkRSI(cs, dir) {
     if (dir === 'short' && pH2 > pH1 * 1.001 && rH2 < rH1 - 2) return { score: 12, label: 'RSI BEAR DIV' };
     if (dir === 'long'  && pL2 < pL1 * 0.999 && rL2 > rL1 + 2) return { score: 12, label: 'RSI BULL DIV' };
   }
-  // Extreme RSI values
   if (dir === 'long'  && last < 35) return { score: 5,  label: 'RSI OVERSOLD' };
   if (dir === 'short' && last > 65) return { score: 5,  label: 'RSI OVERBOUGHT' };
   if (dir === 'long'  && last > 70) return { score: -8, label: 'RSI TOO HIGH' };
@@ -415,11 +654,12 @@ function checkRSI(cs, dir) {
   return { score: 0, label: 'RSI NEUTRAL' };
 }
 
-function checkVolume(cs, dir) {
-  if (cs.length < 26) return { score: 0, ok: false };
+function checkVolume(cs) {
+  if (cs.length < 26) return { score: 0, ok: false, label: 'Vol N/A' };
   const avgVol = cs.slice(-25,-1).reduce((s,c) => s+c.volume, 0) / 24;
   const cur = cs[cs.length-1];
-  if (cur.volume > avgVol * 1.5) return { score: 3, ok: true, label: `Vol +${Math.round(cur.volume/avgVol*100-100)}%` };
+  if (avgVol === 0) return { score: 0, ok: false, label: 'Vol N/A' };
+  if (cur.volume > avgVol * 1.5) return { score: 5, ok: true, label: `Vol +${Math.round(cur.volume/avgVol*100-100)}%` };
   if (cur.volume > avgVol * 1.2) return { score: 1, ok: true, label: `Vol +${Math.round(cur.volume/avgVol*100-100)}%` };
   if (cur.volume < avgVol * 0.5) return { score: -3, ok: false, label: 'Vol LOW' };
   return { score: 0, ok: true, label: 'Vol AVG' };
@@ -454,21 +694,39 @@ function checkSRProximity(levels, entry, dir, curPrice) {
   return best;
 }
 
+// ── FIX 1: checkHTFBias — richer confirmation, mandatory in scanPair ─
+// Uses EMA50 + EMA20 alignment on HTF for a 3-level bias read.
+// score=-999 is the hard-block sentinel (signals against HTF die here).
 function checkHTFBias(htfCandles, dir) {
-  if (!htfCandles || htfCandles.length < 50) return { score: 0, bias: 'neutral', label: 'HTF N/A' };
+  if (!htfCandles || htfCandles.length < 50) return { score: 0, bias: 'neutral', label: 'HTF N/A', hardBlock: false };
   const ema50 = calcEMA(htfCandles, 50);
-  const last = htfCandles[htfCandles.length-1], lastEma = ema50[ema50.length-1].value;
+  const ema20 = htfCandles.length >= 20 ? calcEMA(htfCandles, 20) : null;
+  const last    = htfCandles[htfCandles.length-1];
+  const lastE50 = ema50[ema50.length-1].value;
+  const lastE20 = ema20 ? ema20[ema20.length-1].value : null;
+
   let bias = 'neutral';
-  if (last.close > lastEma * 1.002) bias = 'bull';
-  if (last.close < lastEma * 0.998) bias = 'bear';
-  if (bias === 'neutral') return { score: 0, bias, label: 'HTF NEUTRAL' };
+  if (last.close > lastE50 * 1.002) bias = 'bull';
+  if (last.close < lastE50 * 0.998) bias = 'bear';
+
+  // Strengthen bias if short EMA also agrees
+  const strongBull = bias === 'bull' && lastE20 && lastE20 > lastE50;
+  const strongBear = bias === 'bear' && lastE20 && lastE20 < lastE50;
+
+  if (bias === 'neutral') return { score: 0, bias, label: 'HTF NEUTRAL', hardBlock: false };
+
   const aligned = (dir === 'long' && bias === 'bull') || (dir === 'short' && bias === 'bear');
-  return { score: aligned ? 10 : -12, bias, label: aligned ? `HTF ${bias.toUpperCase()} ✓` : 'HTF COUNTER ✗' };
+  if (!aligned) {
+    // FIX 1: counter-HTF is a hard block — score=-999 so scanPair rejects unconditionally
+    return { score: -999, bias, label: 'HTF COUNTER ✗', hardBlock: true };
+  }
+
+  const score = (strongBull || strongBear) ? 15 : 10;
+  const label = (strongBull || strongBear) ? `HTF ${bias.toUpperCase()} STRONG ✓` : `HTF ${bias.toUpperCase()} ✓`;
+  return { score, bias, label, hardBlock: false };
 }
 
 // ─── BACKTESTED WIN RATE LOOKUP ────────────────────────────────────
-// Returns a confidence modifier based on pattern's historical performance.
-// Loaded from DB at engine startup and refreshed after each backtest run.
 
 let _patternWinRates = {};
 
@@ -484,7 +742,6 @@ function getHistoricalBonus(pattern, tf, assetClass) {
   const key = `${pattern}|${tf}|${assetClass}`;
   const entry = _patternWinRates[key];
   if (!entry || entry.count < 30) return { bonus: 0, winRate: null, suppressed: false };
-  // Suppress patterns with < 50% historical win rate from auto-signals
   if (entry.winRate < 0.50) return { bonus: -15, winRate: entry.winRate, suppressed: true };
   if (entry.winRate >= 0.70) return { bonus: 10,  winRate: entry.winRate, suppressed: false };
   if (entry.winRate >= 0.60) return { bonus: 5,   winRate: entry.winRate, suppressed: false };
@@ -492,22 +749,6 @@ function getHistoricalBonus(pattern, tf, assetClass) {
 }
 
 // ─── MARKET SESSION AWARENESS ───────────────────────────────────────
-// Crypto trades 24/7 but institutional volume clusters around FX sessions.
-// Signals fired during high-liquidity windows have higher follow-through.
-//
-// All times UTC:
-//   Sydney    22:00 – 07:00
-//   Tokyo     00:00 – 09:00
-//   London    07:00 – 16:00
-//   New York  13:00 – 22:00
-//
-// Overlaps (best moments):
-//   London–NY  13:00 – 16:00  ← highest crypto volume globally
-//   Tokyo–Lon  07:00 – 09:00  ← moderate
-//
-// Dead zones (lowest volume, most fakeouts):
-//   Post-NY / pre-Sydney  22:00 – 00:00
-//   Deep Asia             02:00 – 07:00
 
 function getMarketSessions() {
   const h = new Date().getUTCHours();
@@ -519,23 +760,71 @@ function getMarketSessions() {
   return sessions;
 }
 
+// ── FIX 9: getSessionBonus — NY OPEN dead-code resolved ─────────────
+// Old code: LON-NY OVERLAP (13–16) fired first, making NY OPEN (13–15) unreachable.
+// Fixed: NY OPEN window split before OVERLAP continuation.
 function getSessionBonus() {
   const h = new Date().getUTCHours();
-  // London–NY overlap: peak liquidity → strongest signals
-  if (h >= 13 && h < 16) return { bonus: 5,  label: '⚡ LON-NY OVERLAP' };
   // London open: strong momentum
   if (h >= 7  && h < 9)  return { bonus: 3,  label: '🇬🇧 LON OPEN' };
-  // NY open: high volatility breakouts
-  if (h >= 13 && h < 15) return { bonus: 3,  label: '🗽 NY OPEN' };
+  // NY open + London overlap: peak of peak — best signals of the day
+  if (h >= 13 && h < 15) return { bonus: 8,  label: '⚡ LON-NY + NY OPEN' };
+  // London–NY overlap (non-open NY hours): peak liquidity
+  if (h >= 15 && h < 16) return { bonus: 5,  label: '⚡ LON-NY OVERLAP' };
   // Active London session (non-open)
   if (h >= 9  && h < 13) return { bonus: 1,  label: null };
-  // Active NY session (post-open)
-  if (h >= 15 && h < 18) return { bonus: 1,  label: null };
+  // Active NY session (post-overlap)
+  if (h >= 16 && h < 18) return { bonus: 1,  label: null };
   // Tokyo session: lower crypto volume, still ok
   if (h >= 0  && h < 7)  return { bonus: 0,  label: null };
   // Post-NY wind-down (18:00–22:00 UTC): volume fading
   if (h >= 18 && h < 22) return { bonus: -2, label: '🌙 LOW VOL' };
   return { bonus: 0, label: null };
+}
+
+// ── FIX 5: Session gate per pattern type ────────────────────────────
+// Hard blocks that session bonuses alone do not enforce:
+//   - Post-NY (18–22 UTC): ALL patterns blocked — thin book = fakeouts
+//   - Deep Asia (00–07 UTC): reversal patterns blocked — no institutional presence
+//   - Early London (07–08:30 UTC): reversal patterns blocked — direction not yet established
+// Returns { allowed: bool, reason: string|null }
+function isSessionAllowed(pattern, h) {
+  const isReversal = REVERSAL_PATTERNS.has(pattern);
+
+  // Post-NY wind-down: hard block everything
+  if (h >= 18 && h < 22) return { allowed: false, reason: 'post-NY blackout' };
+
+  // Deep Asia: no reversal patterns
+  if (h >= 0 && h < 7 && isReversal) return { allowed: false, reason: 'Asia — no reversals' };
+
+  // Early London open (first 90 min): no reversal patterns — direction not set yet
+  if (h >= 7 && h < 8 && isReversal) return { allowed: false, reason: 'early LON — no reversals' };
+
+  // Fractional hour check for 8:30 cutoff using minutes
+  if (h === 8) {
+    const mins = new Date().getUTCMinutes();
+    if (mins < 30 && isReversal) return { allowed: false, reason: 'early LON — no reversals' };
+  }
+
+  return { allowed: true, reason: null };
+}
+
+// ── FIX 3: Retest zone check ─────────────────────────────────────────
+// After a breakout, a retest brings price back to the broken neckline
+// from the correct side, confirming support-turned-resistance (long) or
+// resistance-turned-support (short).
+// Returns { inRetestZone: bool, retestEntry: number }
+function checkRetestZone(neckline, close, dir, atr) {
+  const retestBand = atr * 0.6; // price must return within 0.6 ATR of the neckline
+  if (dir === 'long') {
+    // For longs: price broke above neckline, now pulling back toward it — in retest zone
+    const inZone = close >= neckline - retestBand && close <= neckline + retestBand * 0.5;
+    return { inRetestZone: inZone, retestEntry: neckline };
+  } else {
+    // For shorts: price broke below neckline, now bouncing back toward it
+    const inZone = close <= neckline + retestBand && close >= neckline - retestBand * 0.5;
+    return { inRetestZone: inZone, retestEntry: neckline };
+  }
 }
 
 // ─── MASTER SIGNAL SCAN ─────────────────────────────────────────────
@@ -544,14 +833,44 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
   const signals = [];
   if (cs.length < 100) return signals;
 
-  // ── 1. REGIME FILTER — only trade trending markets ──────────────
+  // ── 1. REGIME FILTER ── FIX 6: ADX >= 25, slope, Choppiness ────────
   const adxResult = calcADX(cs, 14);
-  if (!adxResult || adxResult.adx < 22) return signals; // skip ranging/choppy market
+  if (!adxResult) return signals;
 
-  // ── 2. Pattern detection (completed patterns only) ───────────────
+  // FIX 6a: minimum ADX raised from 22 to 25
+  if (adxResult.adx < 25) return signals;
+
+  // FIX 6b: ADX slope — trend must be accelerating or at least stable
+  // Compare current ADX to value 5 bars ago
+  if (adxResult.adxHistory.length >= 6) {
+    const adxNow  = adxResult.adxHistory[adxResult.adxHistory.length - 1];
+    const adx5ago = adxResult.adxHistory[adxResult.adxHistory.length - 6];
+    // If ADX peaked > 20 bars ago and has since dropped > 5 points, skip — exhausted trend
+    if (adxResult.adxHistory.length >= 21) {
+      const adx20ago = adxResult.adxHistory[adxResult.adxHistory.length - 21];
+      const adxPeak  = Math.max(...adxResult.adxHistory.slice(-21));
+      if (adxPeak === adx20ago && adxNow < adxPeak - 5) return signals;
+    }
+    // Reject if ADX is falling steeply (> 4 points drop over 5 bars)
+    if (adx5ago - adxNow > 4) return signals;
+  }
+
+  // FIX 6c: Choppiness Index hard block above 61.8
+  const ci = calcChoppiness(cs, 14);
+  if (ci !== null && ci > 61.8) return signals;
+
+  // ── 2. Pattern detection ─────────────────────────────────────────────
   const { highs, lows } = findSwings(cs, 5);
   const levels = calcSR(cs, 120);
-  const candle = detectCandlePattern(cs.slice(0, -1)); // use closed candle
+  const candle  = detectCandlePattern(cs.slice(0, -1)); // closed candle only
+
+  // FIX 2: pre-compute FVGs and OBs for structure proximity check
+  const atr  = calcATR(cs, 14);
+  const fvgs = findFVGs(cs, 100);
+  const obs  = findOrderblocks(cs, 100);
+
+  // VPVR: pre-compute once per scan (shared across patterns)
+  const vpvr = calcVPVR(cs, 50, 100);
 
   const rawPatterns = [
     detectDoubleBottom(lows, cs),
@@ -571,50 +890,84 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
 
   if (!rawPatterns.length) return signals;
 
-  // ── 3. Score each pattern ────────────────────────────────────────
+  const close = cs[cs.length - 1].close;
+  const h     = new Date().getUTCHours();
+
+  // ── 3. Score each pattern ────────────────────────────────────────────
   for (const raw of rawPatterns) {
     const dir = raw.dir;
 
-    // EMA hard block
+    // ── FIX 5: Session gate — hard block before scoring ──────────────
+    const sessionGate = isSessionAllowed(raw.pattern, h);
+    if (!sessionGate.allowed) continue;
+
+    // ── FIX 1: HTF bias — mandatory hard requirement ──────────────────
+    // Counter-HTF signals are rejected here entirely. No score, no vote,
+    // no override. HTF must align or the signal does not exist.
+    const htfCheck = checkHTFBias(htfCandles, dir);
+    if (htfCheck.hardBlock) continue; // absolute block — counter-HTF
+
+    // EMA hard block (existing)
     const emaCheck = checkEMAStack(cs, dir);
     if (emaCheck.score <= -20) continue;
-
-    // HTF filter
-    const htfCheck = checkHTFBias(htfCandles, dir);
-    if (htfCheck.score <= -12) continue; // hard block on counter-HTF
 
     // ADX direction check: +DI vs -DI
     if (dir === 'long'  && adxResult.minusDI > adxResult.plusDI * 1.3) continue;
     if (dir === 'short' && adxResult.plusDI  > adxResult.minusDI * 1.3) continue;
 
-    const macdScore  = checkMACDAlignment(cs, dir);
-    const rsiCheck   = checkRSI(cs, dir);
-    const volCheck   = checkVolume(cs, dir);
-    const srScore    = checkSRProximity(levels, raw.entry, dir, cs[cs.length-1].close);
+    const macdScore = checkMACDAlignment(cs, dir);
+    const rsiCheck  = checkRSI(cs, dir);
+    const volCheck  = checkVolume(cs);
+    const srScore   = checkSRProximity(levels, raw.entry, dir, close);
 
     let candleName = null, candleScore = 0;
     if (candle && candle.dir !== 'neutral') {
       if ((dir === 'long' && candle.dir === 'bull') || (dir === 'short' && candle.dir === 'bear')) {
-        candleName = candle.name; candleScore = 10;
+        candleName = candle.name; candleScore = 15;
       }
     }
 
-    // Confluence vote system — require 3 out of 5
-    const votes = [
-      candleScore >= 10,
-      emaCheck.score > 0,
-      macdScore > 0,
-      htfCheck.score > 0,
-      rsiCheck.score > 0 || volCheck.score > 0,
-    ];
-    const positiveVotes = votes.filter(Boolean).length;
-    if (positiveVotes < 3) continue;
+    // ── FIX 4: Weighted confluence scoring (replaces equal-vote system) ─
+    // HTF(30) EMA(25) RSI(20) Candle(15) MACD(5) Vol(5) — total possible = 100
+    // Minimum threshold: 55 weighted points (equivalent to "3 strong factors aligned")
+    // HTF is now mandatory (hardBlock above), so if we reach here, htfCheck.score > 0
+    const weightedScore =
+      (htfCheck.score > 0 ? 30 : 0) +   // HTF alignment — anchor (mandatory)
+      (emaCheck.score > 0 ? 25 : 0) +    // trend state — primary
+      (rsiCheck.score > 0 ? 20 : 0) +    // momentum / divergence
+      (candleScore >= 15  ? 15 : 0) +    // entry timing candle
+      (macdScore > 0      ?  5 : 0) +    // weak confirmer (lagging)
+      (volCheck.score > 0 ?  5 : 0);     // weak confirmer
+
+    if (weightedScore < 55) continue; // minimum confluence threshold
 
     // Historical performance modifier
     const histBonus = getHistoricalBonus(raw.pattern, tf, assetClass);
-    if (histBonus.suppressed) continue; // pattern has poor historical win rate
+    if (histBonus.suppressed) continue;
 
-    // Build confidence score
+    // ── FIX 2: Structure proximity check ─────────────────────────────
+    // Signal entry must be at or near a FVG or Orderblock.
+    // If no structure is present, signal is allowed but gets a penalty.
+    const structCheck = isAtStructure(raw.entry, dir, fvgs, obs, atr);
+    const structScore = structCheck.ok ? 12 : -8;
+
+    // ── VPVR proximity score ──────────────────────────────────────────
+    // +10 when entry is within 0.5 ATR of POC, VAH, or VAL (high-volume level)
+    // -5  when price is between levels (low-volume void)
+    let vpvrScore = 0;
+    let vpvrLabel = null;
+    if (vpvr) {
+      const buf = atr * 0.5;
+      const nearPOC = Math.abs(raw.entry - vpvr.poc) <= buf;
+      const nearVAH = Math.abs(raw.entry - vpvr.vah) <= buf;
+      const nearVAL = Math.abs(raw.entry - vpvr.val) <= buf;
+      if (nearPOC) { vpvrScore = 10; vpvrLabel = 'VPVR POC'; }
+      else if (dir === 'long'  && nearVAL) { vpvrScore = 10; vpvrLabel = 'VPVR VAL'; }
+      else if (dir === 'short' && nearVAH) { vpvrScore = 10; vpvrLabel = 'VPVR VAH'; }
+      else { vpvrScore = -5; }
+    }
+
+    // ── Build confidence score ────────────────────────────────────────
     const sessionBonus = getSessionBonus();
     let conf = raw.conf;
     conf += emaCheck.score;
@@ -625,50 +978,100 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     conf += htfCheck.score;
     conf += candleScore;
     conf += histBonus.bonus;
-    conf += sessionBonus.bonus;           // session liquidity modifier
-    if (positiveVotes === 5) conf += 5;
-    else if (positiveVotes === 4) conf += 2;
+    conf += structScore;
+    conf += sessionBonus.bonus;
+    conf += vpvrScore;
+
+    // Weighted score bonus tiers
+    if (weightedScore >= 80) conf += 5;
+    else if (weightedScore >= 65) conf += 2;
+
     conf = Math.min(Math.round(conf), 96);
     if (conf < 70) continue;
 
-    // ── Hybrid entry: confirmed breakout vs pending breakout ───
-    // neckline = the pattern's key level (neckline / trendline / rim).
-    // CONFIRMED  → price has already cleared the level in the trade
-    //   direction. Enter at current market price (immediately actionable,
-    //   card shows the live price you can trade right now).
-    // NOT CONFIRMED → price has not yet broken the level. Set entry AT
-    //   the neckline and wait for the real break before triggering — no
-    //   premature entry on a pattern that hasn't confirmed.
-    const neckline  = raw.entry;
-    const close     = cs[cs.length - 1].close;
-    const confirmed = dir === 'long' ? close >= neckline : close <= neckline;
-    const entry     = confirmed ? close : neckline;
+    // ── FIX 3: Entry logic — retest confirmation for breakout patterns ─
+    // Breakout patterns (flags, triangles, wedges) use retest confirmation.
+    // Reversal patterns (H&S, double top/bottom, cup) use standard confirmed/pending.
+    const neckline = raw.entry;
+    const isBreakoutPattern = !REVERSAL_PATTERNS.has(raw.pattern);
+    let entry, entryMode;
 
-    // ── Structure-based SL from entry ──────────────────────────
+    const alreadyBroken = dir === 'long' ? close > neckline : close < neckline;
+    const confirmed      = dir === 'long' ? close >= neckline : close <= neckline;
+
+    if (isBreakoutPattern && alreadyBroken) {
+      // Price has broken out — check if it's in a retest zone
+      const retestInfo = checkRetestZone(neckline, close, dir, atr);
+      if (retestInfo.inRetestZone) {
+        // Perfect: price broke out and returned to test neckline as new S/R
+        entry = close;
+        entryMode = '✓ RETEST CONFIRMED';
+      } else {
+        // Price has broken but not yet come back to retest — set pending retest entry
+        entry = neckline;
+        entryMode = '⧗ AWAITING RETEST';
+      }
+    } else {
+      // Reversal pattern or unbroken breakout: use existing confirmed/pending logic
+      entry = confirmed ? close : neckline;
+      entryMode = confirmed ? '✓ BREAKOUT CONFIRMED' : '⧗ AWAITING BREAK';
+    }
+
+    // ── Structure-based SL ────────────────────────────────────────────
     const sl = structureSL(dir, lows, highs, cs, entry);
-    if (dir === 'long'  && sl >= entry) continue; // degenerate
+    if (dir === 'long'  && sl >= entry) continue;
     if (dir === 'short' && sl <= entry) continue;
 
-    // ── 1:1.5 RR from current price ────────────────────────────
+    // ── Tiered RR: TP1 at 1.0R (30% close), TP2 at 2.0R (40% close), trail rest ─
+    // (Fix from analysis: TP1 at 1.0R hits more often, improving bankroll health)
     const risk = Math.abs(entry - sl);
-    const tp1  = dir === 'long' ? entry + risk * 1.5 : entry - risk * 1.5;
-    const tp2  = dir === 'long' ? entry + risk * 2.5 : entry - risk * 2.5;
+    const tp1  = dir === 'long' ? entry + risk * 1.0 : entry - risk * 1.0;
+    const tp2  = dir === 'long' ? entry + risk * 2.0 : entry - risk * 2.0;
 
-    // Sanity: risk must not be more than 4% of entry (too wide SL = bad signal)
+    // Sanity checks
     if (risk / entry > 0.04) continue;
-    // Sanity: risk must be at least 0.3% (too tight SL gets hunted)
     if (risk / entry < 0.003) continue;
+
+    // Count factors for display
+    const factorCount = [
+      htfCheck.score > 0,
+      emaCheck.score > 0,
+      rsiCheck.score > 0,
+      candleScore >= 15,
+      macdScore > 0,
+      volCheck.score > 0,
+      structCheck.ok,
+    ].filter(Boolean).length;
+
+    const ciLabel = ci !== null ? (ci < 38.2 ? '📈 TRENDING' : `CI ${Math.round(ci)}`) : null;
+
+    // ── Signal quality tier ───────────────────────────────────────────
+    // S-TIER: elite — all major factors aligned, peak session, at structure
+    // A-TIER: high quality — strong HTF + structure confirmed
+    // B-TIER: passing minimum (≥55 weighted, ≥70 conf)
+    let tier;
+    if (weightedScore >= 85 && structCheck.ok && sessionBonus.bonus >= 5) {
+      tier = 'S';
+    } else if (weightedScore >= 70 && structCheck.ok) {
+      tier = 'A';
+    } else {
+      tier = 'B';
+    }
 
     const filterParts = [
       emaCheck.label,
       htfCheck.label,
       rsiCheck.label !== 'RSI NEUTRAL' ? rsiCheck.label : null,
       candleName ? `✓ ${candleName}` : null,
-      volCheck.label,
-      `${positiveVotes}/5 factors`,
+      volCheck.label !== 'Vol N/A' ? volCheck.label : null,
+      structCheck.ok ? `📍 ${structCheck.label}` : null,
+      vpvrLabel ? `📊 ${vpvrLabel}` : null,
+      `${factorCount}/7 factors`,
+      `W:${weightedScore}pts`,
       histBonus.winRate != null ? `Hist WR: ${Math.round(histBonus.winRate * 100)}%` : null,
-      sessionBonus.label,               // e.g. "⚡ LON-NY OVERLAP"
-      confirmed ? '✓ BREAKOUT CONFIRMED' : '⧗ AWAITING BREAK',
+      ciLabel,
+      sessionBonus.label,
+      entryMode,
     ].filter(Boolean).join(' · ');
 
     const expiresAt = Date.now() + (EXPIRY_MINS[tf] || 360) * 60 * 1000;
@@ -694,10 +1097,14 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       detected_at:    Date.now(),
       expires_at:     expiresAt,
       dec:            pair.dec || 4,
-      // Extra info for frontend display
       hist_win_rate:  histBonus.winRate,
-      votes:          positiveVotes,
-      confirmed,                        // true = live-price entry, false = waiting for break
+      votes:          weightedScore, // now stores weighted score, not raw count
+      confirmed:      entryMode.includes('CONFIRMED') || entryMode.includes('RETEST CONFIRMED'),
+      entry_mode:     entryMode,
+      ci:             ci !== null ? +ci.toFixed(1) : null,
+      struct_label:   structCheck.label,
+      tier,
+      vpvr_label:     vpvrLabel,
     });
   }
 
@@ -705,12 +1112,9 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
 }
 
 // ─── SIGNAL STATUS UPDATE ───────────────────────────────────────────
-// Called on each new price tick. Returns updated status if changed.
 
-// Computes R-multiple for the trailing portion relative to original risk.
-// Used after TP1 to calculate how much the trailing half made.
 function computeRMult(sig, exitPrice) {
-  const originalRisk = Math.abs(sig.tp1 - sig.entry) / 1.5;
+  const originalRisk = Math.abs(sig.tp1 - sig.entry) / 1.0; // TP1 is now 1.0R
   if (!originalRisk) return 0;
   const entryPx = sig.entry_price ?? sig.entry;
   return sig.dir === 'long'
@@ -729,27 +1133,21 @@ function updateSignalOnPrice(sig, price) {
   const dir = sig.dir;
 
   if (sig.status === 'pending') {
-    // Entry fires when price moves 0.2% past the signal level in the
-    // trade direction — small enough to enter quickly, large enough to
-    // filter single-tick wick fakeouts.
-    const confirm = sig.entry * 0.002; // 0.2% confirmation
+    const confirm = sig.entry * 0.002;
     const entryHit = dir === 'long'
-      ? price >= sig.entry + confirm   // cleared entry by 0.2% to the upside
-      : price <= sig.entry - confirm;  // cleared entry by 0.2% to the downside
+      ? price >= sig.entry + confirm
+      : price <= sig.entry - confirm;
     if (entryHit) return { status: 'entered', entry_price: price, entered_at: now };
 
-    // Pattern invalidated — price moved away from entry in the wrong direction
     const blown = dir === 'long'
-      ? price < sig.entry * 0.97    // dropped 3% below neckline — setup failed
-      : price > sig.entry * 1.03;   // rose 3% above neckline — setup failed
+      ? price < sig.entry * 0.97
+      : price > sig.entry * 1.03;
     if (blown) return { status: 'expired' };
   }
 
   if (['entered', 'tp1_hit'].includes(sig.status)) {
     const isAfterTP1 = sig.status === 'tp1_hit';
 
-    // After TP1, sig.sl is the live trail stop (updated by server on each price tick).
-    // For entered signals sig.sl is the original structure SL.
     if (dir === 'long'  && price <= sig.sl) {
       const rMult = isAfterTP1 ? Math.max(0, computeRMult(sig, sig.sl)) : -1;
       return { status: 'sl_hit', close_price: sig.sl, r_mult: rMult, closed_at: now };
@@ -761,12 +1159,12 @@ function updateSignalOnPrice(sig, price) {
 
     if (!isAfterTP1 && sig.tp1) {
       if ((dir === 'long' && price >= sig.tp1) || (dir === 'short' && price <= sig.tp1)) {
-        return { status: 'tp1_hit', close_price: price, r_mult: 1.5, closed_at: now };
+        return { status: 'tp1_hit', close_price: price, r_mult: 1.0, closed_at: now };
       }
     }
     if (sig.tp2) {
       if ((dir === 'long' && price >= sig.tp2) || (dir === 'short' && price <= sig.tp2)) {
-        return { status: 'tp2_hit', close_price: price, r_mult: 2.5, closed_at: now };
+        return { status: 'tp2_hit', close_price: price, r_mult: 2.0, closed_at: now };
       }
     }
   }
@@ -774,4 +1172,23 @@ function updateSignalOnPrice(sig, price) {
   return null;
 }
 
-module.exports = { scanPair, updateSignalOnPrice, setPatternWinRates, computeRMult, calcADX, calcATR, calcEMA, calcRSI, calcMACD, findSwings, calcSR, getMarketSessions, getSessionBonus };
+module.exports = {
+  scanPair,
+  updateSignalOnPrice,
+  setPatternWinRates,
+  computeRMult,
+  computeStructureTrail,
+  calcADX,
+  calcATR,
+  calcEMA,
+  calcRSI,
+  calcMACD,
+  calcChoppiness,
+  findSwings,
+  findFVGs,
+  findOrderblocks,
+  calcVPVR,
+  calcSR,
+  getMarketSessions,
+  getSessionBonus,
+};

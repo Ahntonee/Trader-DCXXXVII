@@ -95,11 +95,26 @@ db.exec(`
   );
 `);
 
+// ── v3 schema migrations (safe — no-op if column already exists) ──────
+const _v3Cols = [
+  "ALTER TABLE signals ADD COLUMN tier TEXT",
+  "ALTER TABLE signals ADD COLUMN votes INTEGER",
+  "ALTER TABLE signals ADD COLUMN ci REAL",
+  "ALTER TABLE signals ADD COLUMN struct_label TEXT",
+  "ALTER TABLE signals ADD COLUMN entry_mode TEXT",
+  "ALTER TABLE signals ADD COLUMN mtf_stack INTEGER DEFAULT 0",
+  "ALTER TABLE signals ADD COLUMN mtf_tfs TEXT",
+  "ALTER TABLE signals ADD COLUMN vpvr_label TEXT",
+];
+for (const sql of _v3Cols) {
+  try { db.exec(sql); } catch (e) { /* column already exists — fine */ }
+}
+
 // ── Signals ──────────────────────────────────────────────────
 const insertSignal = db.prepare(`
   INSERT OR IGNORE INTO signals
-  (id,pair_id,sym,tf,asset_class,dir,pattern,candle_pattern,entry,sl,tp1,tp2,htf_bias,confidence,adx,filters,status,detected_at,expires_at)
-  VALUES (@id,@pair_id,@sym,@tf,@asset_class,@dir,@pattern,@candle_pattern,@entry,@sl,@tp1,@tp2,@htf_bias,@confidence,@adx,@filters,@status,@detected_at,@expires_at)
+  (id,pair_id,sym,tf,asset_class,dir,pattern,candle_pattern,entry,sl,tp1,tp2,htf_bias,confidence,adx,filters,status,detected_at,expires_at,tier,votes,ci,struct_label,entry_mode,mtf_stack,mtf_tfs,vpvr_label)
+  VALUES (@id,@pair_id,@sym,@tf,@asset_class,@dir,@pattern,@candle_pattern,@entry,@sl,@tp1,@tp2,@htf_bias,@confidence,@adx,@filters,@status,@detected_at,@expires_at,@tier,@votes,@ci,@struct_label,@entry_mode,@mtf_stack,@mtf_tfs,@vpvr_label)
 `);
 
 const updateSignalStatus = db.prepare(`
@@ -123,8 +138,10 @@ const insertJournal = db.prepare(`
   VALUES (@signal_id,@sym,@tf,@dir,@pattern,@htf_bias,@entry,@exit_price,@sl,@tp1,@tp2,@outcome,@r_mult,@pnl_pct,@confidence,@opened_at,@closed_at,@date)
 `);
 
-const getJournal   = db.prepare(`SELECT * FROM journal ORDER BY closed_at DESC LIMIT 200`);
-const clearJournal = db.prepare(`DELETE FROM journal`);
+const getJournal     = db.prepare(`SELECT * FROM journal ORDER BY closed_at DESC LIMIT 200`);
+const getFullJournal = db.prepare(`SELECT * FROM journal ORDER BY closed_at DESC`);
+const getAllSignals   = db.prepare(`SELECT * FROM signals ORDER BY detected_at DESC`);
+const clearJournal   = db.prepare(`DELETE FROM journal`);
 const updateSignalSL = db.prepare(`UPDATE signals SET sl=@sl WHERE id=@id`);
 
 // ── Pattern stats ─────────────────────────────────────────────
@@ -182,6 +199,8 @@ module.exports = {
   expireOldSignals,
   insertJournal,
   getJournal,
+  getFullJournal,
+  getAllSignals,
   clearJournal,
   updateSignalSL,
   upsertPatternStat,
