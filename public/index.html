@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>APEX TERMINAL v2 — Signal Engine</title>
+<title>APEX TERMINAL v3 — Signal Engine</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='12' fill='%230d1b2a'/><path d='M32 11 L55 51 L9 51 Z' fill='none' stroke='%232dd4bf' stroke-width='5' stroke-linejoin='round'/><path d='M32 11 L41 27 L23 27 Z' fill='%23d4af37'/></svg>">
 <meta name="theme-color" content="#0d1b2a">
 <script>
@@ -342,7 +342,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 <body style="display:flex;flex-direction:column;height:100%;">
 
 <div class="topbar">
-  <div class="logo">APEX<em>TERMINAL</em><sup>v2</sup></div>
+  <div class="logo">APEX<em>TERMINAL</em><sup>v3</sup></div>
   <div class="topbar-center">
     <div class="status-pill connecting" id="wsStatus"><div class="pulse"></div><span id="wsLabel">CONNECTING</span></div>
     <div class="tf-group">
@@ -484,16 +484,38 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
     <div class="tab-content" id="tab-backtest">
       <div class="bt-wrap">
         <div class="bt-note">Runs a walk-forward backtest on 18 months of historical data. Validates which patterns are actually profitable before the live engine uses them.<br><br>⏱ Takes 15–30 minutes (all 26 pairs × 1h + 4h). Run once per week.</div>
-        <button class="bt-run-btn" id="btRunBtn" onclick="startBacktest()">▶ RUN BACKTEST</button>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <button class="bt-run-btn" id="btRunBtn" onclick="startBacktest()">▶ RUN BACKTEST</button>
+          <a href="/api/export/backtest" download="apex_backtest.csv" style="font-size:8px;padding:5px 10px;border:1px solid var(--border);border-radius:4px;background:none;color:var(--muted);font-family:'JetBrains Mono',monospace;cursor:pointer;letter-spacing:1px;text-decoration:none;" onmouseover="this.style.color='var(--green)'" onmouseout="this.style.color='var(--muted)'">⬇ EXPORT CSV</a>
+          <a href="/api/export/signals" download="apex_signals.csv" style="font-size:8px;padding:5px 10px;border:1px solid var(--border);border-radius:4px;background:none;color:var(--muted);font-family:'JetBrains Mono',monospace;cursor:pointer;letter-spacing:1px;text-decoration:none;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--muted)'">⬇ ALL SIGNALS</a>
+        </div>
+
+        <!-- STATUS BANNER -->
+        <div id="btStatusBanner" style="display:none;margin-top:8px;padding:8px 10px;border-radius:4px;font-size:9px;letter-spacing:0.5px;font-family:'JetBrains Mono',monospace;border:1px solid;"></div>
+
         <div class="bt-progress" id="btProgress" style="display:none;">
           <div class="bt-prog-label" id="btProgLabel">Starting…</div>
           <div class="bt-prog-bar-wrap"><div class="bt-prog-bar" id="btProgBar" style="width:0%"></div></div>
         </div>
-        <div class="bt-results-table" id="btResultsTable" style="display:none;">
-          <div class="bt-table-head"><div>Pattern</div><div>Win %</div><div>Avg R</div><div>Trades</div></div>
-          <div id="btResultsBody"></div>
+
+        <!-- WALK-FORWARD BACKTEST RESULTS -->
+        <div id="btResultsSection" style="display:none;">
+          <div style="font-size:8px;letter-spacing:1.5px;color:var(--muted);margin:10px 0 6px 0;border-bottom:1px solid var(--border);padding-bottom:4px;">WALK-FORWARD BACKTEST — 18 MONTHS</div>
+          <div id="btSummaryGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:8px;"></div>
+          <div class="bt-results-table" id="btResultsTable">
+            <div class="bt-table-head"><div>Pattern · TF</div><div>Win %</div><div>Avg R</div><div>Trades</div><div>Sharpe</div></div>
+            <div id="btResultsBody"></div>
+          </div>
+          <div class="bt-note" id="btLastRun" style="color:var(--accent);margin-top:6px;"></div>
         </div>
-        <div class="bt-note" id="btLastRun" style="display:none;color:var(--accent);"></div>
+
+        <!-- LIVE PATTERN PERFORMANCE (pattern_stats) -->
+        <div style="font-size:8px;letter-spacing:1.5px;color:var(--muted);margin:12px 0 6px 0;border-bottom:1px solid var(--border);padding-bottom:4px;">LIVE ENGINE PERFORMANCE — ALL-TIME CLOSED TRADES</div>
+        <div id="btLiveSummaryGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:8px;"></div>
+        <div id="btLiveTable" style="font-size:9px;">
+          <div class="bt-table-head"><div>Pattern · TF</div><div>Win %</div><div>Avg R</div><div>Trades</div><div>Status</div></div>
+          <div id="btLiveBody"><div style="padding:12px;text-align:center;color:var(--muted);font-size:9px;">No live data yet — let the engine run overnight</div></div>
+        </div>
       </div>
     </div>
 
@@ -528,7 +550,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
           <div class="stat-card"><div class="stat-lbl">CURRENT STREAK</div><div class="stat-val" id="jStreak">—</div></div>
         </div>
         <div class="equity-wrap">
-          <div class="equity-lbl">EQUITY CURVE<button onclick="clearJournal()" style="font-size:8px;padding:2px 7px;border:1px solid var(--border);border-radius:3px;background:none;color:var(--muted);font-family:'JetBrains Mono',monospace;cursor:pointer;letter-spacing:1px;" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">CLEAR</button></div>
+          <div class="equity-lbl">EQUITY CURVE<button onclick="clearJournal()" style="font-size:8px;padding:2px 7px;border:1px solid var(--border);border-radius:3px;background:none;color:var(--muted);font-family:'JetBrains Mono',monospace;cursor:pointer;letter-spacing:1px;" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">CLEAR</button><a href="/api/export/journal" download="apex_journal.csv" style="font-size:8px;padding:2px 7px;border:1px solid var(--border);border-radius:3px;background:none;color:var(--muted);font-family:'JetBrains Mono',monospace;cursor:pointer;letter-spacing:1px;text-decoration:none;margin-left:4px;" onmouseover="this.style.color='var(--green)'" onmouseout="this.style.color='var(--muted)'">⬇ CSV</a></div>
           <canvas id="equityChart"></canvas>
         </div>
         <div class="journal-log" id="journalLog"><div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No trades logged yet</div></div>
@@ -625,6 +647,7 @@ function handleServerMessage(msg) {
     case 'stats_init':
       patternStats = msg.data||[];
       renderPatternStats();
+      renderLivePerformance(patternStats);
       break;
     case 'backtest_progress':
       updateBacktestProgress(msg.done, msg.total, msg.label);
@@ -635,11 +658,14 @@ function handleServerMessage(msg) {
     case 'backtest_done':
       document.getElementById('btRunBtn').disabled=false;
       document.getElementById('btRunBtn').textContent='▶ RUN BACKTEST';
+      document.getElementById('btProgress').style.display='none';
       showAlert('✓ Backtest complete — results updated','entry');
       break;
     case 'backtest_error':
       document.getElementById('btRunBtn').disabled=false;
       document.getElementById('btRunBtn').textContent='▶ RUN BACKTEST';
+      document.getElementById('btProgress').style.display='none';
+      setBtStatus(false, '✗ Backtest failed: ' + (msg.message||'unknown error') + ' — check server logs');
       break;
   }
 }
@@ -886,7 +912,7 @@ function buildSignalCard(s) {
   const statusText={
     pending:  '⏳ AWAITING ENTRY',
     entered:  '⚡ IN TRADE — monitor SL',
-    tp1_hit:  `🔄 TRAILING — 50% locked +1.5R · stop: ${trailPrice}`,
+    tp1_hit:  `🔄 TRAILING — 30% locked +1.0R · stop: ${trailPrice}`,
     tp2_hit:  '🎯 TP2 HIT — full target reached',
     sl_hit:   '🛑 STOPPED OUT',
     expired:  '⏰ EXPIRED',
@@ -909,6 +935,11 @@ function buildSignalCard(s) {
   const confClass=s.confidence>=80?'high':'med';
   const tfBadge=s.tf?s.tf.toUpperCase():'';
   const cpBadge=s.candle_pattern?`<span class="cp-badge ${s.dir==='long'?'bull':'bear'}">🕯 ${s.candle_pattern}</span>`:'';
+  const tierColors={'S':'#FFD700','A':'#35c46e','B':'#7c5cbf'};
+  const tierBadge=s.tier?`<span style="font-size:9px;font-weight:800;padding:2px 7px;border-radius:3px;background:${tierColors[s.tier]||'#7c5cbf'}22;color:${tierColors[s.tier]||'#7c5cbf'};border:1px solid ${tierColors[s.tier]||'#7c5cbf'}55;letter-spacing:1px;">${s.tier}-TIER</span>`:'';
+  const ciBadge=s.ci!=null?`<span style="font-size:8px;padding:2px 5px;border-radius:3px;background:rgba(93,173,226,0.1);color:#5da9e9;border:1px solid rgba(93,173,226,0.3);">CI ${s.ci}${s.ci<38.2?' 📈':''}</span>`:'';
+  const vpvrBadge=s.vpvr_label?`<span style="font-size:8px;padding:2px 5px;border-radius:3px;background:rgba(255,183,77,0.1);color:#ffb74d;border:1px solid rgba(255,183,77,0.3);">📊 ${s.vpvr_label}</span>`:'';
+  const structBadge=s.struct_label?`<span style="font-size:8px;padding:2px 5px;border-radius:3px;background:rgba(45,212,191,0.1);color:#2dd4bf;border:1px solid rgba(45,212,191,0.3);">📍 ${s.struct_label}</span>`:'';
 
   // ── #1 Price-progress bar: SL (0%) → Entry → TP1 → TP2 (100%) ──
   let progressHtml='';
@@ -944,11 +975,13 @@ function buildSignalCard(s) {
     <div class="sig-head">
       <div class="sig-dir ${s.dir}">${s.dir==='long'?'▲ LONG':'▼ SHORT'} · ${s.sym}</div>
       <div class="sig-badges">
+        ${tierBadge}
         <span class="sig-tf-badge">${tfBadge}</span>
         <span class="sig-conf ${confClass}">${s.confidence}%</span>
       </div>
     </div>
     <div class="sig-pattern">📐 ${s.pattern} ${cpBadge} ${adxBadge} ${histWRBadge} ${mtfBadge}</div>
+    ${(ciBadge||vpvrBadge||structBadge)?`<div style="display:flex;gap:4px;flex-wrap:wrap;padding:4px 0 2px 0;">${ciBadge}${vpvrBadge}${structBadge}</div>`:''}
     ${pnlHtml}
     ${progressHtml}
     ${pendingMetaHtml}
@@ -963,11 +996,11 @@ function buildSignalCard(s) {
         <div class="slr-pct">${s.status==='tp1_hit'?'trailing':'–'+riskPct.toFixed(2)+'%'}</div>
       </div>
       <div class="sig-level-row tp1-row">
-        <div class="slr-label">TP1 (60%)</div>
+        <div class="slr-label">TP1 (30%)</div>
         <div class="slr-price">${fmt(tp1,dec)}</div>
-        <div class="slr-pct">+${tp1Pct.toFixed(2)}% · 1:1.5</div>
+        <div class="slr-pct">+${tp1Pct.toFixed(2)}% · 1:1.0</div>
       </div>
-      ${tp2?`<div class="sig-level-row tp2-row"><div class="slr-label">TP2 (rest)</div><div class="slr-price">${fmt(tp2,dec)}</div><div class="slr-pct">+${tp2Pct.toFixed(2)}% · 1:2.5</div></div>`:''}
+      ${tp2?`<div class="sig-level-row tp2-row"><div class="slr-label">TP2 (40%)</div><div class="slr-price">${fmt(tp2,dec)}</div><div class="slr-pct">+${tp2Pct.toFixed(2)}% · 1:2.0</div></div>`:''}
     </div>
     <div class="sig-meta">
       ${s.filters?`<div>🔎 <span>${s.filters}</span></div>`:''}
@@ -995,7 +1028,7 @@ function buildSizingBlock(s) {
   if (!riskPerUnit) return '';
   const units    = riskUSD / riskPerUnit;
   const posSize  = units * s.entry;
-  const tp1USD   = riskUSD * 1.5;
+  const tp1USD   = riskUSD * 1.0;
   const fmt2 = v => v >= 1000 ? '$'+v.toFixed(0) : '$'+v.toFixed(2);
   return `<div class="sig-sizing">
     <div class="sz-item"><div class="sz-lbl">RISK $</div><div class="sz-val">${fmt2(riskUSD)}</div></div>
@@ -1391,18 +1424,93 @@ function updateBacktestProgress(done,total,label) {
   document.getElementById('btProgLabel').textContent=`${label} (${done}/${total})`;
 }
 
+function setBtStatus(ok, msg) {
+  const el = document.getElementById('btStatusBanner');
+  el.style.display = 'block';
+  el.style.background = ok ? 'rgba(53,196,110,0.08)' : 'rgba(237,80,103,0.08)';
+  el.style.borderColor = ok ? 'rgba(53,196,110,0.35)' : 'rgba(237,80,103,0.35)';
+  el.style.color = ok ? 'var(--green)' : 'var(--red)';
+  el.textContent = msg;
+}
+
 function renderBacktestResults(results) {
-  if (!results.length) return;
-  document.getElementById('btResultsTable').style.display='block';
-  document.getElementById('btLastRun').style.display='block';
-  document.getElementById('btLastRun').textContent=`Last run: ${new Date(results[0]?.run_at||Date.now()).toLocaleString()}`;
-  document.getElementById('btResultsBody').innerHTML=results.slice(0,20).map(r=>{
-    const wr=r.win_rate||0; const wrPct=(wr*100).toFixed(0)+'%';
-    const cls=wr>=0.60?'good':wr>=0.50?'avg':'bad';
-    return `<div class="bt-table-row"><div style="font-size:8px">${r.pattern}<span style="opacity:0.5;margin-left:4px">${r.tf}</span></div><div class="bt-wr ${cls}">${wrPct}</div><div style="color:var(--gold)">${(r.avg_r||0).toFixed(2)}R</div><div style="color:var(--muted)">${r.total_signals}</div></div>`;
+  if (!results.length) {
+    setBtStatus(false, '✗ No backtest data — click RUN BACKTEST to generate results');
+    return;
+  }
+  document.getElementById('btResultsSection').style.display = 'block';
+  const runAt = new Date(results[0]?.run_at || Date.now()).toLocaleString();
+  document.getElementById('btLastRun').textContent = `Last run: ${runAt}`;
+
+  // Summary grid
+  const totalTrades = results.reduce((s,r) => s + (r.total_signals||0), 0);
+  const totalWins   = results.reduce((s,r) => s + (r.wins||0), 0);
+  const overallWR   = totalTrades ? (totalWins/totalTrades*100).toFixed(0) : '—';
+  const avgR        = results.length ? (results.reduce((s,r)=>s+(r.avg_r||0),0)/results.length).toFixed(2) : '—';
+  const best        = results.reduce((b,r) => r.win_rate > b.win_rate ? r : b, results[0]);
+  const worst       = results.reduce((b,r) => r.win_rate < b.win_rate ? r : b, results[0]);
+  document.getElementById('btSummaryGrid').innerHTML = [
+    ['PATTERNS TESTED', results.length, ''],
+    ['OVERALL WIN RATE', overallWR+'%', overallWR>=60?'var(--green)':'var(--red)'],
+    ['AVG R (all)', avgR+'R', +avgR>=1?'var(--green)':'var(--gold)'],
+    ['TOTAL TRADES', totalTrades, ''],
+  ].map(([lbl,val,col])=>`<div style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;"><div style="font-size:7px;color:var(--muted);letter-spacing:1px;">${lbl}</div><div style="font-size:13px;font-weight:700;margin-top:2px;color:${col||'var(--text)'};">${val}</div></div>`).join('');
+
+  // Results table — sorted by win rate desc
+  const sorted = [...results].sort((a,b)=>(b.win_rate||0)-(a.win_rate||0));
+  document.getElementById('btResultsBody').innerHTML = sorted.map(r => {
+    const wr = r.win_rate||0, wrPct = (wr*100).toFixed(0)+'%';
+    const cls = wr>=0.65?'good':wr>=0.50?'avg':'bad';
+    const ddStr = r.max_dd != null ? (r.max_dd*100).toFixed(1)+'%' : '—';
+    const sharpe = r.sharpe != null ? r.sharpe.toFixed(2) : '—';
+    const engBadge = wr>=0.70 ? '<span style="font-size:7px;padding:1px 4px;border-radius:2px;background:rgba(53,196,110,0.15);color:var(--green);border:1px solid rgba(53,196,110,0.3)">✓ ACTIVE</span>'
+                   : wr<0.45  ? '<span style="font-size:7px;padding:1px 4px;border-radius:2px;background:rgba(237,80,103,0.12);color:var(--red);border:1px solid rgba(237,80,103,0.3)">✗ SUPPRESSED</span>'
+                               : '';
+    return `<div class="bt-table-row">
+      <div style="font-size:8px;line-height:1.4">${r.pattern}<br><span style="opacity:0.45;font-size:7px">${r.symbol||'ALL'} · ${r.tf} · ${r.sample_from||''}→${(r.sample_to||'').slice(2)}</span></div>
+      <div class="bt-wr ${cls}">${wrPct}<br><span style="font-size:7px;opacity:0.6">W${r.wins||0}/L${r.losses||0}</span></div>
+      <div style="color:var(--gold)">${(r.avg_r||0).toFixed(2)}R</div>
+      <div style="color:var(--muted)">${r.total_signals||0}</div>
+      <div style="font-size:8px;color:var(--muted2)">${sharpe}<br>${engBadge}</div>
+    </div>`;
   }).join('');
-  // Backtest results live in their own table above; the GT Zones pattern
-  // panel stays journal-derived (live performance), so it is not touched here.
+
+  setBtStatus(true, `✓ Backtest complete — ${results.length} pattern/TF combinations tested · ${totalTrades} total simulated trades · Overall WR: ${overallWR}%`);
+}
+
+function renderLivePerformance(stats) {
+  if (!stats || !stats.length) {
+    document.getElementById('btLiveBody').innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:9px;">No live data yet — let the engine run overnight</div>';
+    document.getElementById('btLiveSummaryGrid').innerHTML = '';
+    return;
+  }
+  const totalTrades = stats.reduce((s,r)=>s+(r.count||0),0);
+  const totalWins   = stats.reduce((s,r)=>s+(r.wins||0),0);
+  const overallWR   = totalTrades ? (totalWins/totalTrades*100).toFixed(0) : '—';
+  const avgR        = stats.length ? (stats.reduce((s,r)=>s+(r.avg_r||0),0)/stats.length).toFixed(2) : '—';
+  const reliable    = stats.filter(r=>r.count>=30).length;
+  document.getElementById('btLiveSummaryGrid').innerHTML = [
+    ['LIVE PATTERNS', stats.length, ''],
+    ['LIVE WIN RATE', overallWR+'%', +overallWR>=60?'var(--green)':'var(--red)'],
+    ['LIVE AVG R', avgR+'R', +avgR>=1?'var(--green)':'var(--gold)'],
+    ['RELIABLE (≥30)', reliable, reliable>0?'var(--green)':'var(--muted)'],
+  ].map(([lbl,val,col])=>`<div style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;"><div style="font-size:7px;color:var(--muted);letter-spacing:1px;">${lbl}</div><div style="font-size:13px;font-weight:700;margin-top:2px;color:${col||'var(--text)'};">${val}</div></div>`).join('');
+
+  const sorted = [...stats].sort((a,b)=>(b.count||0)-(a.count||0));
+  document.getElementById('btLiveBody').innerHTML = sorted.map(r => {
+    const wr = r.win_rate||0, wrPct = (wr*100).toFixed(0)+'%';
+    const cls = wr>=0.65?'good':wr>=0.50?'avg':'bad';
+    const trust = r.count>=30 ? '<span style="font-size:7px;padding:1px 4px;border-radius:2px;background:rgba(53,196,110,0.15);color:var(--green);border:1px solid rgba(53,196,110,0.3)">✓ RELIABLE</span>'
+                : r.count>=10 ? '<span style="font-size:7px;padding:1px 4px;border-radius:2px;background:rgba(212,175,55,0.12);color:var(--gold);border:1px solid rgba(212,175,55,0.3)">~ BUILDING</span>'
+                              : '<span style="font-size:7px;padding:1px 4px;border-radius:2px;background:rgba(90,100,114,0.2);color:var(--muted);border:1px solid var(--border)">LOW DATA</span>';
+    return `<div class="bt-table-row">
+      <div style="font-size:8px">${r.pattern}<span style="opacity:0.45;margin-left:4px;font-size:7px">${r.tf} · ${r.asset_class||'crypto'}</span></div>
+      <div class="bt-wr ${cls}">${wrPct}</div>
+      <div style="color:var(--gold)">${(r.avg_r||0).toFixed(2)}R</div>
+      <div style="color:var(--muted)">${r.count||0}</div>
+      <div>${trust}</div>
+    </div>`;
+  }).join('');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1487,7 +1595,13 @@ document.querySelectorAll('.ind-btn').forEach(btn=>{
 document.getElementById('chBtn').addEventListener('click',()=>{ showChannel=!showChannel; document.getElementById('chBtn').classList.toggle('on',showChannel); });
 document.getElementById('smcBtn').addEventListener('click',()=>{ showSMC=!showSMC; document.getElementById('smcBtn').classList.toggle('on',showSMC); if(!showSMC) clearSMC(); });
 document.querySelectorAll('.tab-btn').forEach(btn=>{
-  btn.addEventListener('click',()=>{ const tab=btn.dataset.tab; document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active')); btn.classList.add('active'); document.getElementById('tab-'+tab).classList.add('active'); if(tab==='journal')renderJournal(); if(tab==='gametheory'){renderNashPanel();renderPatternStats();} if(tab==='backtest'){ fetch('/api/backtest/results').then(r=>r.json()).then(d=>{if(d.length)renderBacktestResults(d);}).catch(()=>{}); } });
+  btn.addEventListener('click',()=>{ const tab=btn.dataset.tab; document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active')); btn.classList.add('active'); document.getElementById('tab-'+tab).classList.add('active'); if(tab==='journal')renderJournal(); if(tab==='gametheory'){renderNashPanel();renderPatternStats();} if(tab==='backtest'){
+  fetch('/api/backtest/results').then(r=>r.json()).then(d=>{
+    if(d.length) renderBacktestResults(d);
+    else setBtStatus(false,'✗ No backtest data yet — click RUN BACKTEST to generate results');
+  }).catch(()=>{});
+  fetch('/api/stats').then(r=>r.json()).then(d=>{ patternStats=d; renderLivePerformance(d); }).catch(()=>{});
+} });
 });
 
 // Notification permission (only on user gesture, not on load)
@@ -1533,8 +1647,9 @@ async function init() {
       fetch('/api/backtest/results').then(r=>r.json()),
     ]);
     journal=journalData; renderJournal();
-    patternStats=statsData; renderPatternStats();
+    patternStats=statsData; renderPatternStats(); renderLivePerformance(statsData);
     if (btData.length) renderBacktestResults(btData);
+    else setBtStatus(false,'✗ No backtest data yet — click RUN BACKTEST to generate results');
   } catch(e) { /* server may not have data yet */ }
 
   setInterval(renderSignals, 10000); // refresh proximity bars every 10s

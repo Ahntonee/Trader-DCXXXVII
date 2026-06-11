@@ -8,6 +8,8 @@ const fetch    = require('node-fetch');
 const path     = require('path');
 const db       = require('./db');
 const engine   = require('./signal-engine');
+// Candle cache for structure-based trailing — keyed by pairId+tf
+const _candleCache = {};
 const tg       = require('./telegram');
 const { runBacktest } = require('./backtester');
 
@@ -344,9 +346,17 @@ async function processNewSignal(sig) {
 
     db.insertSignal.run({
       ...sig,
-      candle_pattern: sig.candle_pattern || null,
-      htf_bias: sig.htf_bias || 'neutral',
-      adx: sig.adx || null,
+      candle_pattern: sig.candle_pattern  ?? null,
+      htf_bias:       sig.htf_bias        ?? 'neutral',
+      adx:            sig.adx             ?? null,
+      tier:           sig.tier            ?? null,
+      votes:          sig.votes           ?? null,
+      ci:             sig.ci              ?? null,
+      struct_label:   sig.struct_label    ?? null,
+      entry_mode:     sig.entry_mode      ?? null,
+      mtf_stack:      sig.mtf_stack       ? 1 : 0,
+      mtf_tfs:        sig.mtf_tfs         ?? null,
+      vpvr_label:     sig.vpvr_label      ?? null,
     });
     broadcast({ type: 'new_signal', data: sig });
     broadcast({ type: 'summary_init', data: summaryPayload() });
@@ -371,23 +381,23 @@ function handleSignalUpdate(sig, updates) {
     });
     broadcast({ type: 'signal_update', id: sig.id, updates });
 
-    // ── TP1 HIT: lock 50% at +1.5R, arm trailing stop ─────────────
+    // ── TP1 HIT: lock 30% at +1.0R, arm structure trailing stop ──────
     if (updates.status === 'tp1_hit') {
       const entryPx  = updates.entry_price ?? sig.entry_price ?? sig.entry;
       const exitPrice = updates.close_price || sig.tp1;
 
-      // Set trail stop to breakeven in DB — computeTrailStop will only move it up from here
+      // Set trail stop to breakeven — structure trail will only move it in favour
       db.updateSignalSL.run({ id: sig.id, sl: entryPx });
       broadcast({ type: 'signal_update', id: sig.id, updates: { sl: entryPx } });
 
-      // Journal: 50% partial exit
+      // Journal: 30% partial exit at 1.0R (tiered exit v3)
       const pnlPct = entryPx > 0 ? ((exitPrice - entryPx) / entryPx * (sig.dir === 'long' ? 100 : -100)) : 0;
       db.insertJournal.run({
         signal_id: sig.id, sym: sig.sym, tf: sig.tf, dir: sig.dir,
         pattern: sig.pattern, htf_bias: sig.htf_bias,
         entry: entryPx, exit_price: exitPrice,
         sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2,
-        outcome: 'tp1', r_mult: 1.5, pnl_pct: +pnlPct.toFixed(3),
+        outcome: 'tp1', r_mult: 1.0, pnl_pct: +pnlPct.toFixed(3),
         confidence: sig.confidence,
         opened_at: sig.entered_at || sig.detected_at,
         closed_at: updates.closed_at,
@@ -395,31 +405,31 @@ function handleSignalUpdate(sig, updates) {
       });
       db.upsertPatternStat.run({
         pattern: sig.pattern, tf: sig.tf, asset_class: sig.asset_class || 'crypto',
-        wins: 1, losses: 0, total_r: 1.5, count: 1, win_rate: 1, avg_r: 1.5,
+        wins: 1, losses: 0, total_r: 1.0, count: 1, win_rate: 1, avg_r: 1.0,
       });
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
       broadcast({ type: 'summary_init', data: summaryPayload() });
       tg.sendMessage(tg.formatTPHit(sig, 'tp1'));
-      console.log(`[TRAIL] ${sig.sym} TP1 hit — 50% locked +1.5R, trailing stop armed at breakeven`);
+      console.log(`[TRAIL] ${sig.sym} TP1 hit — 30% locked +1.0R, structure trailing stop armed at breakeven`);
     }
 
-    // ── TRAIL CLOSE or TP2: log remaining 50% ─────────────────────
+    // ── TRAIL CLOSE or TP2: log remaining position ────────────────
     if (['tp2_hit', 'sl_hit'].includes(updates.status)) {
-      const wasTrailing = sig.status === 'tp1_hit'; // came from tp1_hit state
+      const wasTrailing = sig.status === 'tp1_hit';
       const entryPx    = sig.entry_price ?? sig.entry;
       const exitPrice  = updates.close_price ?? (updates.status === 'sl_hit' ? sig.sl : sig.tp2);
 
       let rMult;
       if (wasTrailing) {
-        // Trailing portion r_mult — computed from entry to trail/TP2 exit, always >= 0
-        const risk = Math.abs(sig.tp1 - sig.entry) / 1.5;
+        // FIX 8: risk unit is 1.0R (TP1 = 1.0R in v3)
+        const risk = Math.abs(sig.tp1 - sig.entry) / 1.0;
         rMult = risk > 0
           ? (sig.dir === 'long' ? (exitPrice - entryPx) : (entryPx - exitPrice)) / risk
           : 0;
         rMult = Math.max(0, +rMult.toFixed(3));
       } else {
-        // Standard entered → SL or (theoretical) direct close
-        rMult = updates.status === 'sl_hit' ? -1 : 2.5;
+        // Standard entered → SL or direct close (no TP1 hit)
+        rMult = updates.status === 'sl_hit' ? -1 : 2.0; // TP2 is 2.0R in v3
       }
 
       const outcome   = wasTrailing
@@ -461,22 +471,32 @@ function handleSignalUpdate(sig, updates) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// TRAILING STOP CALCULATOR
-// After TP1 is hit, server keeps sig.sl updated in the DB as the
-// live trailing stop. Trail distance = 0.5R behind current price.
+// FIX 8: STRUCTURE-BASED TRAILING STOP
+// After TP1 is hit, trail behind the most recent confirmed swing low
+// (long) or swing high (short) using computeStructureTrail from the
+// engine — which requires recent candles for swing detection.
+// Falls back to 0.5R arithmetic trail when no candle cache is available.
 // Stop only moves in favour — never backwards.
 // ═══════════════════════════════════════════════════════════════════
 
 function computeTrailStop(sig, price) {
-  const originalRisk = Math.abs(sig.tp1 - sig.entry) / 1.5;
+  // Prefer structure-based trail using cached candles for this pair+tf
+  const cacheKey = `${sig.pair_id}_${sig.tf}`;
+  const cachedCandles = _candleCache[cacheKey];
+  if (cachedCandles && cachedCandles.length >= 20) {
+    const newSL = engine.computeStructureTrail(sig, cachedCandles);
+    if (newSL !== null) return newSL;
+  }
+  // Arithmetic fallback (0.5R) — matches old behaviour when cache is cold
+  const originalRisk = Math.abs(sig.tp1 - sig.entry) / 1.0; // TP1 is now 1.0R
   if (!originalRisk) return null;
-  const trailDist = originalRisk * 0.5; // trail 0.5R behind price
+  const trailDist = originalRisk * 0.5;
   if (sig.dir === 'long') {
     const t = price - trailDist;
-    return t > sig.sl ? +t.toFixed(8) : null; // only move up
+    return t > sig.sl ? +t.toFixed(8) : null;
   } else {
     const t = price + trailDist;
-    return t < sig.sl ? +t.toFixed(8) : null; // only move down
+    return t < sig.sl ? +t.toFixed(8) : null;
   }
 }
 
@@ -542,12 +562,14 @@ async function scanOnePair(pair) {
         getBinanceKlines(pair.id, tf, limit),
         getBinanceKlines(pair.id, htfTf, htfLimit),
       ]);
+      // FIX 8: cache candles for structure-based trailing stop
+      _candleCache[`${pair.id}_${tf}`] = candles;
       const newSigs = await engine.scanPair(candles, htfCandles, pair, tf, 'crypto');
       for (const sig of newSigs) await processNewSignal(sig);
     } catch (e) {
       console.warn(`[Scan] ${pair.id} ${tf}:`, e.message);
     }
-    await new Promise(r => setTimeout(r, 200)); // small gap between TFs on same pair
+    await new Promise(r => setTimeout(r, 200));
   }
 }
 
@@ -617,6 +639,8 @@ async function scan15mFast() {
         getBinanceKlines(pair.id, TF,  limit),
         getBinanceKlines(pair.id, HTF, htfLimit),
       ]);
+      // FIX 8: cache candles for structure-based trailing stop
+      _candleCache[`${pair.id}_${TF}`] = candles;
       const newSigs = await engine.scanPair(candles, htfCandles, pair, TF, 'crypto');
       for (const sig of newSigs) { await processNewSignal(sig); found++; }
     }));
@@ -708,6 +732,43 @@ app.get('/api/sessions', (req, res) => {
     bonus:   engine.getSessionBonus(),
     utcHour: new Date().getUTCHours(),
   });
+});
+
+// ── CSV export helpers ────────────────────────────────────────────────
+function toCSV(rows) {
+  if (!rows.length) return '';
+  const headers = Object.keys(rows[0]);
+  const escape  = v => {
+    if (v == null) return '';
+    const s = String(v);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? '"' + s.replace(/"/g, '""') + '"'
+      : s;
+  };
+  const lines = [headers.join(',')];
+  for (const row of rows) lines.push(headers.map(h => escape(row[h])).join(','));
+  return lines.join('\r\n');
+}
+
+app.get('/api/export/journal', (req, res) => {
+  const rows = db.getFullJournal.all();
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="apex_journal.csv"');
+  res.send(toCSV(rows));
+});
+
+app.get('/api/export/signals', (req, res) => {
+  const rows = db.getAllSignals.all();
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="apex_signals.csv"');
+  res.send(toCSV(rows));
+});
+
+app.get('/api/export/backtest', (req, res) => {
+  const rows = db.getBacktestResults.all();
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="apex_backtest.csv"');
+  res.send(toCSV(rows));
 });
 
 // Trigger a full backtest run (can take several minutes)
