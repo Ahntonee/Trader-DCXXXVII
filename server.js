@@ -321,8 +321,26 @@ wss.on('connection', ws => {
 // SIGNAL PROCESSING
 // ═══════════════════════════════════════════════════════════════════
 
+// Maximum simultaneous longs or shorts across ALL pairs.
+// Prevents correlated crypto-beta wipeout during flash crashes.
+const MAX_CORRELATED = 2;
+
 async function processNewSignal(sig) {
   try {
+    // ── Correlation cap ───────────────────────────────────────────
+    // Count active signals in the same direction (pending or entered).
+    // MTF stacks on the SAME pair are exempt — they are one trade.
+    const allActive = db.getActiveSignals.all();
+    const sameDir = allActive.filter(s =>
+      s.dir === sig.dir &&
+      s.pair_id !== sig.pair_id &&
+      ['pending', 'entered', 'tp1_hit'].includes(s.status)
+    );
+    if (sameDir.length >= MAX_CORRELATED) {
+      console.log(`[Cap] ${sig.dir.toUpperCase()} ${sig.sym} blocked — ${sameDir.length} ${sig.dir} signals already active (cap: ${MAX_CORRELATED})`);
+      return;
+    }
+
     // ── MTF confluence check ─────────────────────────────────────
     // If another active signal for the same pair + direction already
     // exists on a DIFFERENT timeframe, both signals are "stacked" —
@@ -357,6 +375,8 @@ async function processNewSignal(sig) {
       mtf_stack:      sig.mtf_stack       ? 1 : 0,
       mtf_tfs:        sig.mtf_tfs         ?? null,
       vpvr_label:     sig.vpvr_label      ?? null,
+      vol_regime:     sig.vol_regime      ?? null,
+      size_mult:      sig.size_mult       ?? null,
     });
     broadcast({ type: 'new_signal', data: sig });
     broadcast({ type: 'summary_init', data: summaryPayload() });
@@ -575,7 +595,28 @@ async function scanOnePair(pair) {
 
 // Parallel scanner: splits pairs into batches of 4, runs concurrently.
 // Full cycle: ~3 min for 26 pairs (vs 39 min sequential)
+// Expire pending signals that are still open when the 18 UTC blackout begins.
+// A signal that fired at 17:59 would otherwise get filled during dead-hour fakeouts.
+function expireBlackoutSignals() {
+  const h = new Date().getUTCHours();
+  if (h < 18 || h >= 22) return; // only active during blackout window
+  const pending = db.getActiveSignals.all().filter(s => s.status === 'pending');
+  for (const sig of pending) {
+    db.updateSignalStatus.run({
+      id: sig.id, status: 'expired',
+      entry_price: null, close_price: null,
+      r_mult: null, entered_at: null, closed_at: Date.now(),
+    });
+    broadcast({ type: 'signal_update', id: sig.id, updates: { status: 'expired' } });
+  }
+  if (pending.length) {
+    console.log(`[Blackout] Expired ${pending.length} pending signal(s) — 18 UTC blackout`);
+    broadcast({ type: 'summary_init', data: summaryPayload() });
+  }
+}
+
 async function scanCryptoSignals() {
+  expireBlackoutSignals();
   db.expireOldSignals.run(Date.now());
   const BATCH = 4;
   for (let i = 0; i < CRYPTO_PAIRS.length; i += BATCH) {

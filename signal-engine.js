@@ -157,6 +157,34 @@ function calcMACD(data, fast = 12, slow = 26, signal = 9) {
   return { macdLine, signalLine };
 }
 
+// ─── VOLATILITY REGIME ───────────────────────────────────────────────
+// Compares current ATR to its 20-period average to classify market vol.
+// LOW     → current ATR < 70% of avg  → reduce size, wider stop needed
+// NORMAL  → 70–130% of avg            → standard sizing
+// ELEVATED→ 130–200% of avg           → halve position size
+// EXTREME → > 200% of avg             → no new entries (skip)
+// Returns { regime, atrRatio, sizeMultiplier }
+function calcVolRegime(cs) {
+  if (cs.length < 35) return { regime: 'NORMAL', atrRatio: 1, sizeMultiplier: 1 };
+  // Current ATR (last 14 bars)
+  const curATR = calcATR(cs, 14);
+  // Average ATR over the last 20 measurements (each measured on a 14-bar window)
+  const atrs = [];
+  for (let i = cs.length - 20; i < cs.length; i++) {
+    if (i < 14) continue;
+    atrs.push(calcATR(cs.slice(0, i + 1), 14));
+  }
+  if (!atrs.length || !curATR) return { regime: 'NORMAL', atrRatio: 1, sizeMultiplier: 1 };
+  const avgATR = atrs.reduce((s, v) => s + v, 0) / atrs.length;
+  const ratio  = avgATR > 0 ? curATR / avgATR : 1;
+  let regime, sizeMultiplier;
+  if      (ratio > 2.0) { regime = 'EXTREME';  sizeMultiplier = 0;    }
+  else if (ratio > 1.3) { regime = 'ELEVATED'; sizeMultiplier = 0.5;  }
+  else if (ratio < 0.7) { regime = 'LOW';      sizeMultiplier = 0.75; }
+  else                  { regime = 'NORMAL';   sizeMultiplier = 1;    }
+  return { regime, atrRatio: +ratio.toFixed(2), sizeMultiplier };
+}
+
 // ─── SWING POINTS ────────────────────────────────────────────────────
 
 function findSwings(cs, lb = 5) {
@@ -859,6 +887,11 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
   const ci = calcChoppiness(cs, 14);
   if (ci !== null && ci > 61.8) return signals;
 
+  // Vol regime — EXTREME (ATR > 2× average) blocks all new signals to prevent
+  // sizing into a volatility spike that blows normal SL distances.
+  const volRegime = calcVolRegime(cs);
+  if (volRegime.regime === 'EXTREME') return signals;
+
   // ── 2. Pattern detection ─────────────────────────────────────────────
   const { highs, lows } = findSwings(cs, 5);
   const levels = calcSR(cs, 120);
@@ -896,6 +929,10 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
   // ── 3. Score each pattern ────────────────────────────────────────────
   for (const raw of rawPatterns) {
     const dir = raw.dir;
+
+    // 15m reversal patterns have proven unprofitable — block entirely on this TF.
+    // Continuations (flags, triangles, wedges) are still allowed on 15m.
+    if (tf === '15m' && REVERSAL_PATTERNS.has(raw.pattern)) continue;
 
     // ── FIX 5: Session gate — hard block before scoring ──────────────
     const sessionGate = isSessionAllowed(raw.pattern, h);
@@ -939,7 +976,9 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       (macdScore > 0      ?  5 : 0) +    // weak confirmer (lagging)
       (volCheck.score > 0 ?  5 : 0);     // weak confirmer
 
-    if (weightedScore < 55) continue; // minimum confluence threshold
+    // 15m is noisier — require stronger confluence to filter fakeouts
+    const minScore = tf === '15m' ? 70 : 55;
+    if (weightedScore < minScore) continue;
 
     // Historical performance modifier
     const histBonus = getHistoricalBonus(raw.pattern, tf, assetClass);
@@ -1074,6 +1113,14 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       entryMode,
     ].filter(Boolean).join(' · ');
 
+    // Proximity filter — price must be within 1.5 ATR of the entry level.
+    // Signals fired too far from entry expire unused at a 41% rate; this
+    // cuts that waste by only emitting when the setup is actually actionable.
+    // Exception: already-confirmed entries (price already broke/retested) are always emitted.
+    const distToEntry = Math.abs(close - entry);
+    const isConfirmedEntry = entryMode.includes('CONFIRMED');
+    if (!isConfirmedEntry && distToEntry > atr * 1.5) continue;
+
     const expiresAt = Date.now() + (EXPIRY_MINS[tf] || 360) * 60 * 1000;
 
     signals.push({
@@ -1105,6 +1152,8 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       struct_label:   structCheck.label,
       tier,
       vpvr_label:     vpvrLabel,
+      vol_regime:     volRegime.regime,
+      size_mult:      volRegime.sizeMultiplier,
     });
   }
 
@@ -1188,6 +1237,7 @@ module.exports = {
   findFVGs,
   findOrderblocks,
   calcVPVR,
+  calcVolRegime,
   calcSR,
   getMarketSessions,
   getSessionBonus,

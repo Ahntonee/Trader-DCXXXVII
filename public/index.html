@@ -321,21 +321,42 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .pattern-row.lowdata{opacity:0.5;}
 .pattern-row .pr-lowdata{font-size:7px;color:var(--gold);border:1px solid rgba(212,175,55,0.3);border-radius:2px;padding:0 3px;letter-spacing:0.5px;}
 
+/* ── Tier filter buttons ── */
+.tier-filter-btn{font-family:'JetBrains Mono',monospace;font-size:7px;font-weight:700;letter-spacing:1px;padding:3px 8px;border-radius:3px;border:1px solid var(--border2);background:none;color:var(--muted);cursor:pointer;transition:all 0.15s;}
+.tier-filter-btn:hover{color:var(--text2);border-color:var(--accent);}
+.tier-filter-btn.active{background:var(--accent);color:#000;border-color:var(--accent);}
+.tier-filter-btn.s.active{background:#FFD700;border-color:#FFD700;color:#000;}
+.tier-filter-btn.a.active{background:#35c46e;border-color:#35c46e;color:#000;}
+.tier-filter-btn.b.active{background:#7c5cbf;border-color:#7c5cbf;color:#fff;}
+
 /* ── Mobile responsiveness ── */
 @media (max-width: 820px){
   .workspace{flex-direction:column;}
-  .right-panel{width:100%!important;border-left:none;border-top:1px solid var(--border);max-height:46vh;}
-  .chart-section{min-height:42vh;}
-  .topbar{flex-wrap:wrap;height:auto;padding:6px 10px;gap:8px;}
-  .topbar-center{order:3;width:100%;justify-content:flex-start;overflow-x:auto;}
-  .session-bar{flex-wrap:wrap;}
-  .mini-strip{gap:10px;}
+  .right-panel{width:100%!important;border-left:none;border-top:1px solid var(--border);height:auto;max-height:52vh;min-height:260px;}
+  .tab-content{overflow-y:auto;-webkit-overflow-scrolling:touch;}
+  .chart-section{min-height:40vh;flex:none;}
+  .topbar{flex-wrap:wrap;height:auto;padding:6px 10px;gap:6px;}
+  .topbar-center{order:3;width:100%;justify-content:flex-start;overflow-x:auto;gap:6px;}
+  .session-bar{flex-wrap:wrap;gap:4px;}
+  .mini-strip{gap:8px;flex-wrap:wrap;}
+  .watchbar{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;padding:4px 8px;}
+  .pair-btn{font-size:8px;padding:3px 7px;}
+  .ind-group{gap:3px;}
+  .tab-btn{font-size:7px;padding:8px 2px;letter-spacing:0.5px;}
+  .sig-card{border-radius:4px;}
+  .journal-wrap,.bt-wrap{padding:8px;}
 }
 @media (max-width: 480px){
-  .logo{font-size:12px;letter-spacing:2px;}
+  .logo{font-size:11px;letter-spacing:1.5px;}
   .chart-stats{display:none;}
   .dir-split{flex-direction:column;}
   .stat-grid{grid-template-columns:1fr 1fr;}
+  .right-panel{max-height:56vh;}
+  .topbar-center .ch-btn{display:none;} /* hide less-used buttons on small screens */
+  #posToolBtn{display:none;}
+  .session-bar{display:none;} /* session bar moves to mini-strip on tiny screens */
+  .clock{display:none;}
+  .sig-meta{display:none;} /* collapse meta on tiny screens */
 }
 </style>
 </head>
@@ -455,6 +476,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         <span class="pos-size-lbl">RISK %</span>
         <input class="pos-size-input" id="psRisk" type="number" placeholder="1" min="0.1" max="5" step="0.1" style="width:60px">
         <span class="pos-size-result" id="psResult">— set account to see sizing</span>
+      </div>
+      <div style="display:flex;gap:4px;padding:5px 8px 0 8px;flex-shrink:0;align-items:center;">
+        <span style="font-size:7px;color:var(--muted);letter-spacing:1px;margin-right:2px;">FILTER:</span>
+        <button class="tier-filter-btn active" data-tier="ALL" onclick="setTierFilter('ALL')">ALL</button>
+        <button class="tier-filter-btn s" data-tier="S" onclick="setTierFilter('S')">S-TIER</button>
+        <button class="tier-filter-btn a" data-tier="A" onclick="setTierFilter('A')">A-TIER</button>
+        <button class="tier-filter-btn b" data-tier="B" onclick="setTierFilter('B')">B-TIER</button>
+        <span style="margin-left:auto;font-size:7px;color:var(--muted);letter-spacing:0.5px;" id="sigFilterCount"></span>
       </div>
       <div class="signals-wrap" id="signalsWrap">
         <div class="no-signals"><div style="font-size:20px;margin-bottom:12px;opacity:0.3">◈</div>SERVER SCANNING MARKETS<br><span style="font-size:9px;color:var(--muted2)">Signals appear when high-probability setups are detected</span></div>
@@ -879,19 +908,37 @@ function connectBinanceWS(pair, tf) {
 // ═══════════════════════════════════════════════════════════════
 // SIGNAL RENDERING (exchange-agnostic)
 // ═══════════════════════════════════════════════════════════════
+let _activeTierFilter = 'ALL';
+function setTierFilter(tier) {
+  _activeTierFilter = tier;
+  document.querySelectorAll('.tier-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tier === tier);
+  });
+  renderSignals();
+}
+
 function renderSignals() {
   const wrap=document.getElementById('signalsWrap');
-  const pairSigs=Object.values(signals)
-    // Only live signals remain in the tab — awaiting entry, in trade, or
-    // trailing. tp2_hit / sl_hit / expired are journaled and drop off.
+  let pairSigs=Object.values(signals)
     .filter(s=>s.pair_id===activePair.id&&['pending','entered','tp1_hit'].includes(s.status))
-    // Newest signals stacked on top of older ones.
     .sort((a,b)=>(b.detected_at||0)-(a.detected_at||0));
-  if (!pairSigs.length) {
-    wrap.innerHTML=`<div class="no-signals"><div style="font-size:20px;margin-bottom:12px;opacity:0.3">◈</div>NO ACTIVE SIGNALS<br><span style="font-size:9px;color:var(--muted2)">Server scans ${activePair.sym} every ~90s</span></div>`;
+
+  // Apply tier filter (signals without tier field pass through — older signals)
+  const filtered = _activeTierFilter === 'ALL'
+    ? pairSigs
+    : pairSigs.filter(s => !s.tier || s.tier === _activeTierFilter);
+
+  const countEl = document.getElementById('sigFilterCount');
+  if (countEl) countEl.textContent = filtered.length + '/' + pairSigs.length + ' signals';
+
+  if (!filtered.length) {
+    const msg = pairSigs.length && _activeTierFilter !== 'ALL'
+      ? `No ${_activeTierFilter}-TIER signals for ${activePair.sym}`
+      : `Server scans ${activePair.sym} every ~90s`;
+    wrap.innerHTML=`<div class="no-signals"><div style="font-size:20px;margin-bottom:12px;opacity:0.3">◈</div>NO ACTIVE SIGNALS<br><span style="font-size:9px;color:var(--muted2)">${msg}</span></div>`;
     return;
   }
-  wrap.innerHTML=pairSigs.map(s=>buildSignalCard(s)).join('');
+  wrap.innerHTML=filtered.map(s=>buildSignalCard(s)).join('');
 }
 
 function buildSignalCard(s) {
@@ -940,6 +987,9 @@ function buildSignalCard(s) {
   const ciBadge=s.ci!=null?`<span style="font-size:8px;padding:2px 5px;border-radius:3px;background:rgba(93,173,226,0.1);color:#5da9e9;border:1px solid rgba(93,173,226,0.3);">CI ${s.ci}${s.ci<38.2?' 📈':''}</span>`:'';
   const vpvrBadge=s.vpvr_label?`<span style="font-size:8px;padding:2px 5px;border-radius:3px;background:rgba(255,183,77,0.1);color:#ffb74d;border:1px solid rgba(255,183,77,0.3);">📊 ${s.vpvr_label}</span>`:'';
   const structBadge=s.struct_label?`<span style="font-size:8px;padding:2px 5px;border-radius:3px;background:rgba(45,212,191,0.1);color:#2dd4bf;border:1px solid rgba(45,212,191,0.3);">📍 ${s.struct_label}</span>`:'';
+  const volColors={'NORMAL':'var(--muted)','LOW':'#5da9e9','ELEVATED':'var(--gold)','EXTREME':'var(--red)'};
+  const volRegimeBadge=s.vol_regime&&s.vol_regime!=='NORMAL'?`<span style="font-size:8px;padding:2px 5px;border-radius:3px;background:rgba(0,0,0,0.2);color:${volColors[s.vol_regime]||'var(--muted)'};border:1px solid ${volColors[s.vol_regime]||'var(--border)'}40;">⚡ VOL ${s.vol_regime}${s.size_mult!=null&&s.size_mult<1?' — SIZE ×'+s.size_mult:''}</span>`:'';
+  const sizingGuidance=s.size_mult!=null&&s.size_mult<1?`<div style="font-size:8px;padding:4px 8px;border-radius:3px;background:rgba(212,175,55,0.08);border:1px solid rgba(212,175,55,0.25);color:var(--gold);margin:4px 0;">⚠ Elevated vol — scale position to ×${s.size_mult} normal size</div>`:'';
 
   // ── #1 Price-progress bar: SL (0%) → Entry → TP1 → TP2 (100%) ──
   let progressHtml='';
@@ -981,7 +1031,8 @@ function buildSignalCard(s) {
       </div>
     </div>
     <div class="sig-pattern">📐 ${s.pattern} ${cpBadge} ${adxBadge} ${histWRBadge} ${mtfBadge}</div>
-    ${(ciBadge||vpvrBadge||structBadge)?`<div style="display:flex;gap:4px;flex-wrap:wrap;padding:4px 0 2px 0;">${ciBadge}${vpvrBadge}${structBadge}</div>`:''}
+    ${(ciBadge||vpvrBadge||structBadge||volRegimeBadge)?`<div style="display:flex;gap:4px;flex-wrap:wrap;padding:4px 0 2px 0;">${ciBadge}${vpvrBadge}${structBadge}${volRegimeBadge}</div>`:''}
+    ${sizingGuidance}
     ${pnlHtml}
     ${progressHtml}
     ${pendingMetaHtml}
@@ -1047,9 +1098,38 @@ function updateSizingDisplay() {
   renderSignals(); // rebuild cards with new sizing
 }
 
+// Track which signals have already fired a proximity alert so we don't spam
+const _alertedSignals = new Set();
+
+function fireProximityAlert(s, distPct) {
+  if (_alertedSignals.has(s.id)) return;
+  _alertedSignals.add(s.id);
+  const msg = `${s.sym} ${s.dir.toUpperCase()} — entry in ${distPct.toFixed(2)}% · ${s.pattern} [${s.tf}]`;
+  // In-app banner
+  showAlert('🎯 ' + msg, 'entry');
+  // Browser notification if permitted
+  if (Notification?.permission === 'granted') {
+    try {
+      new Notification('APEX — Entry Near', {
+        body: msg,
+        icon: '/favicon.ico',
+        tag: s.id, // deduplicates if already shown
+      });
+    } catch(e) {}
+  }
+}
+
 function updateSignalLivePnL(pairId, price) {
   Object.values(signals).forEach(s=>{
     if (s.pair_id===pairId) s.latestPrice=price;
+  });
+  // Proximity alert — fire once when pending signal is within 0.3% of entry
+  Object.values(signals).forEach(s=>{
+    if (s.pair_id!==pairId || s.status!=='pending' || !s.entry) return;
+    const dist = Math.abs(price - s.entry) / s.entry * 100;
+    if (dist <= 0.3) fireProximityAlert(s, dist);
+    // Clear alert cache when price moves away so it can re-fire next approach
+    if (dist > 1.0) _alertedSignals.delete(s.id);
   });
   if (activePair.id===pairId && Object.values(signals).some(s=>s.pair_id===pairId&&['pending','entered','tp1_hit'].includes(s.status))) {
     renderSignals();
