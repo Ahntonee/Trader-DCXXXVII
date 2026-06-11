@@ -57,15 +57,15 @@ const CRYPTO_PAIRS = [
   { id: 'LTCUSDT',  sym: 'LTC',  dec: 2,  minMove: 0.01    },
   { id: 'ONDOUSDT', sym: 'ONDO', dec: 4,  minMove: 0.0001  },
   // ── High-volume meme / narrative tokens ───────────────────────
-  { id: 'PEPEUSDT', sym: 'PEPE', dec: 8,  minMove: 0.00000001 },
   { id: 'WIFUSDT',  sym: 'WIF',  dec: 4,  minMove: 0.0001  },
+  { id: 'SHIBUSDT', sym: 'SHIB', dec: 8,  minMove: 0.00000001 },
   // ── Ecosystem / narrative expansion ───────────────────────────
   { id: 'NEARUSDT', sym: 'NEAR', dec: 3,  minMove: 0.001   },
   { id: 'INJUSDT',  sym: 'INJ',  dec: 3,  minMove: 0.001   },
   { id: 'OPUSDT',   sym: 'OP',   dec: 4,  minMove: 0.0001  },
   { id: 'ARBUSDT',  sym: 'ARB',  dec: 4,  minMove: 0.0001  },
   { id: 'JUPUSDT',  sym: 'JUP',  dec: 4,  minMove: 0.0001  },
-  { id: 'APTUSDT',  sym: 'APT',  dec: 3,  minMove: 0.001   },
+  { id: 'FTMUSDT',  sym: 'FTM',  dec: 4,  minMove: 0.0001  },
   { id: 'ATOMUSDT', sym: 'ATOM', dec: 3,  minMove: 0.001   },
   { id: 'TIAUSDT',  sym: 'TIA',  dec: 3,  minMove: 0.001   },
 ];
@@ -117,12 +117,20 @@ const CANDLE_LIMIT = { '15m': 200, '1h': 200, '4h': 150, '1d': 100 };
 // source comes back (e.g. on a cloud host where Binance is reachable).
 const _src = {}; // name → { fails, until }
 function srcSkip(name){ const s=_src[name]; return !!(s && s.until > Date.now()); }
-function srcDown(name){ const s=_src[name]||(_src[name]={fails:0,until:0}); if(++s.fails>=3){ s.until=Date.now()+120000; } }
+function srcDown(name){ const s=_src[name]||(_src[name]={fails:0,until:0}); if(++s.fails>=3){ s.until=Date.now()+120000; console.warn(`[CB] ${name} circuit-broken for 2 min after ${s.fails} failures`); } }
 function srcUp(name){ _src[name]={fails:0,until:0}; }
+// 4xx errors mean the symbol doesn't exist on this source — don't penalise the source
+class SymbolNotFound extends Error {}
 async function trySource(name, fn){
   if (srcSkip(name)) return null;
-  try { const r = await fn(); if (r) { srcUp(name); return r; } srcDown(name); return null; }
-  catch { srcDown(name); return null; }
+  try {
+    const r = await fn();
+    if (r) { srcUp(name); return r; }
+    srcDown(name); return null;
+  } catch(e) {
+    if (e instanceof SymbolNotFound) return null; // symbol absent — don't trip breaker
+    srcDown(name); return null;
+  }
 }
 
 // One retry on full-chain failure — most timeouts are transient network
@@ -141,6 +149,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
   let r = await trySource('binance', async () => {
     const url = `${BINANCE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const res = await fetch(url, { timeout: 8000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`Binance 4xx ${res.status} for ${symbol}`);
     if (!res.ok) throw new Error(`Binance ${res.status}`);
     const data = await res.json();
     return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
@@ -152,6 +161,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
     const btf = BYBIT_TF[interval] || '60';
     const url = `${BYBIT}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&limit=${limit}`;
     const res = await fetch(url, { timeout: 10000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`Bybit 4xx ${res.status} for ${symbol}`);
     if (!res.ok) throw new Error(`Bybit ${res.status}`);
     const data = await res.json();
     if (data.retCode !== 0) throw new Error(`Bybit: ${data.retMsg}`);
@@ -169,7 +179,10 @@ async function fetchKlinesChain(symbol, interval, limit) {
     const res = await fetch(url, { timeout: 10000 });
     if (!res.ok) throw new Error(`CC ${res.status}`);
     const data = await res.json();
-    if (data.Response !== 'Success') throw new Error(`CC: ${data.Message}`);
+    if (data.Response !== 'Success') {
+      if (/not found|no data|invalid/i.test(data.Message || '')) throw new SymbolNotFound(`CC: ${data.Message}`);
+      throw new Error(`CC: ${data.Message}`);
+    }
     const cc = (data.Data?.Data || []).filter(c => c.close > 0)
       .map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volumefrom }));
     return cc.length ? cc : null;

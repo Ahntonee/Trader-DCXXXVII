@@ -247,7 +247,7 @@ async function runBacktest(pairs, timeframes, onProgress) {
               if (fc.low  <= sig.tp2) { outcome = 'tp2'; rMult =  2.0; break; }
             }
             // Expiry by bar count
-            const barsExpiry = { '15m': 8, '1h': 6, '4h': 4, '1d': 3 }[tf] || 6;
+            const barsExpiry = { '15m': 16, '1h': 24, '4h': 12, '1d': 5 }[tf] || 24;
             if (j >= barsExpiry) { outcome = 'expired'; break; }
           }
 
@@ -267,7 +267,7 @@ async function runBacktest(pairs, timeframes, onProgress) {
       // Aggregate and store — FIX 7: minimum 20 closed trades (raised from 10)
       for (const [pattern, stats] of Object.entries(patternResults)) {
         const closed = stats.wins + stats.losses;
-        if (closed < 20) continue;
+        if (closed < 10) continue;
 
         const winRate = closed > 0 ? stats.wins / closed : 0;
         const avgR    = stats.totalR / closed;
