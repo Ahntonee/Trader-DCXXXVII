@@ -105,6 +105,8 @@ const _v3Cols = [
   "ALTER TABLE signals ADD COLUMN mtf_stack INTEGER DEFAULT 0",
   "ALTER TABLE signals ADD COLUMN mtf_tfs TEXT",
   "ALTER TABLE signals ADD COLUMN vpvr_label TEXT",
+  "ALTER TABLE signals ADD COLUMN vol_regime TEXT",
+  "ALTER TABLE signals ADD COLUMN size_mult REAL",
 ];
 for (const sql of _v3Cols) {
   try { db.exec(sql); } catch (e) { /* column already exists — fine */ }
@@ -113,8 +115,8 @@ for (const sql of _v3Cols) {
 // ── Signals ──────────────────────────────────────────────────
 const insertSignal = db.prepare(`
   INSERT OR IGNORE INTO signals
-  (id,pair_id,sym,tf,asset_class,dir,pattern,candle_pattern,entry,sl,tp1,tp2,htf_bias,confidence,adx,filters,status,detected_at,expires_at,tier,votes,ci,struct_label,entry_mode,mtf_stack,mtf_tfs,vpvr_label)
-  VALUES (@id,@pair_id,@sym,@tf,@asset_class,@dir,@pattern,@candle_pattern,@entry,@sl,@tp1,@tp2,@htf_bias,@confidence,@adx,@filters,@status,@detected_at,@expires_at,@tier,@votes,@ci,@struct_label,@entry_mode,@mtf_stack,@mtf_tfs,@vpvr_label)
+  (id,pair_id,sym,tf,asset_class,dir,pattern,candle_pattern,entry,sl,tp1,tp2,htf_bias,confidence,adx,filters,status,detected_at,expires_at,tier,votes,ci,struct_label,entry_mode,mtf_stack,mtf_tfs,vpvr_label,vol_regime,size_mult)
+  VALUES (@id,@pair_id,@sym,@tf,@asset_class,@dir,@pattern,@candle_pattern,@entry,@sl,@tp1,@tp2,@htf_bias,@confidence,@adx,@filters,@status,@detected_at,@expires_at,@tier,@votes,@ci,@struct_label,@entry_mode,@mtf_stack,@mtf_tfs,@vpvr_label,@vol_regime,@size_mult)
 `);
 
 const updateSignalStatus = db.prepare(`
