@@ -77,12 +77,14 @@ const FOREX_PAIRS = [
 
 const TIMEFRAMES = ['15m', '1h', '4h', '1d'];
 const MTF_MAP    = { '15m': '1h', '1h': '4h', '4h': '1d', '1d': '1d' };
-const BINANCE    = 'https://api.binance.com';
+const BINANCE    = 'https://api.binance.com';   // geo-blocked in Nigeria — kept as last resort via cloud
 const BYBIT      = 'https://api.bybit.com';
 const BYBIT_TF   = { '15m':'15','1h':'60','4h':'240','1d':'D' };
 const MEXC       = 'https://api.mexc.com';
 const OKX        = 'https://www.okx.com';
 const OKX_TF     = { '15m':'15m','1h':'1H','4h':'4H','1d':'1D' };
+const KUCOIN     = 'https://api.kucoin.com';
+const KUCOIN_TF  = { '15m':'15min','1h':'1hour','4h':'4hour','1d':'1day' };
 const TWELVE     = 'https://api.twelvedata.com';
 const CC_BASE    = 'https://min-api.cryptocompare.com/data/v2';
 const CC_TF      = { '15m':['histominute',15],'1h':['histohour',1],'4h':['histohour',4],'1d':['histoday',1] };
@@ -91,9 +93,10 @@ const YF_INT     = { '15m':'15m','1h':'1h','4h':'1h','1d':'1d' };
 const YF_RANGE   = { '15m':'5d','1h':'30d','4h':'120d','1d':'200d' };
 const YF_AGG     = { '4h':4 };
 
-function ccSym(symbol) { return symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol; }
-function yfSym(symbol) { return symbol.endsWith('USDT') ? `${symbol.slice(0,-4)}-USD` : symbol; }
-function okxSym(symbol) { return symbol.endsWith('USDT') ? symbol.slice(0,-4)+'-USDT' : symbol; }
+function ccSym(symbol)     { return symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol; }
+function yfSym(symbol)     { return symbol.endsWith('USDT') ? `${symbol.slice(0,-4)}-USD` : symbol; }
+function okxSym(symbol)    { return symbol.endsWith('USDT') ? symbol.slice(0,-4)+'-USDT' : symbol; }
+function kucoinSym(symbol) { return symbol.endsWith('USDT') ? symbol.slice(0,-4)+'-USDT' : symbol; }
 function aggregateCandles(candles, factor) {
   if (!factor || factor <= 1) return candles;
   const out = [];
@@ -149,22 +152,11 @@ async function getBinanceKlines(symbol, interval, limit) {
 }
 
 async function fetchKlinesChain(symbol, interval, limit) {
-  // 1. Binance
-  let r = await trySource('binance', async () => {
-    const url = `${BINANCE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, { timeout: 8000 });
-    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`Binance 4xx ${res.status} for ${symbol}`);
-    if (!res.ok) throw new Error(`Binance ${res.status}`);
-    const data = await res.json();
-    return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
-  });
-  if (r) return r;
-
-  // 2. Bybit
-  r = await trySource('bybit', async () => {
+  // 1. Bybit — works in Nigeria, no geo-block
+  let r = await trySource('bybit', async () => {
     const btf = BYBIT_TF[interval] || '60';
     const url = `${BYBIT}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&limit=${limit}`;
-    const res = await fetch(url, { timeout: 10000 });
+    const res = await fetch(url, { timeout: 8000 });
     if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`Bybit 4xx ${res.status} for ${symbol}`);
     if (!res.ok) throw new Error(`Bybit ${res.status}`);
     const data = await res.json();
@@ -175,7 +167,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
-  // 3. MEXC (same REST format as Binance — drop-in)
+  // 2. MEXC — works in Nigeria, Binance-compatible format
   r = await trySource('mexc', async () => {
     const url = `${MEXC}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const res = await fetch(url, { timeout: 8000 });
@@ -187,7 +179,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
-  // 4. OKX
+  // 3. OKX — works in Nigeria
   r = await trySource('okx', async () => {
     const instId = okxSym(symbol);
     const bar    = OKX_TF[interval] || '1H';
@@ -203,7 +195,24 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
-  // 5. CryptoCompare
+  // 4. KuCoin — works in Nigeria
+  r = await trySource('kucoin', async () => {
+    const sym  = kucoinSym(symbol);
+    const type = KUCOIN_TF[interval] || '1hour';
+    const url  = `${KUCOIN}/api/v1/market/candles?symbol=${sym}&type=${type}`;
+    const res  = await fetch(url, { timeout: 10000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`KuCoin 4xx ${res.status} for ${symbol}`);
+    if (!res.ok) throw new Error(`KuCoin ${res.status}`);
+    const data = await res.json();
+    if (data.code !== '200000' || !data.data?.length) return null;
+    // KuCoin returns newest-first — reverse, then trim to limit
+    return [...data.data].reverse().slice(-limit).map(c => ({
+      time: +c[0], open:+c[1], close:+c[2], high:+c[3], low:+c[4], volume:+c[5],
+    }));
+  });
+  if (r) return r;
+
+  // 5. CryptoCompare — data API, no geo-block
   r = await trySource('cryptocompare', async () => {
     const [ep, agg] = CC_TF[interval] || ['histohour', 1];
     const fsym = ccSym(symbol);
@@ -221,7 +230,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
-  // 6. Yahoo Finance (last resort)
+  // 6. Yahoo Finance
   r = await trySource('yahoo', async () => {
     const yf = yfSym(symbol);
     const yfRes = await fetch(
@@ -240,20 +249,24 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
+  // 7. Binance — geo-blocked in Nigeria locally; works when deployed to cloud
+  r = await trySource('binance', async () => {
+    const url = `${BINANCE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+    const res = await fetch(url, { timeout: 8000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`Binance 4xx ${res.status} for ${symbol}`);
+    if (!res.ok) throw new Error(`Binance ${res.status}`);
+    const data = await res.json();
+    return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+  });
+  if (r) return r;
+
   throw new Error(`all sources failed for ${symbol} ${interval}`);
 }
 
 async function getBinanceTicker(symbol) {
   // 1. Binance
-  let r = await trySource('binance', async () => {
-    const res = await fetch(`${BINANCE}/api/v3/ticker/24hr?symbol=${symbol}`, { timeout: 5000 });
-    if (!res.ok) throw new Error(`Ticker ${res.status}`);
-    return res.json();
-  });
-  if (r) return r;
-
-  // 2. Bybit
-  r = await trySource('bybit', async () => {
+  // 1. Bybit ticker
+  let r = await trySource('bybit', async () => {
     const res = await fetch(`${BYBIT}/v5/market/tickers?category=spot&symbol=${symbol}`, { timeout: 5000 });
     if (!res.ok) throw new Error(`Bybit ticker ${res.status}`);
     const data = await res.json();
@@ -263,7 +276,39 @@ async function getBinanceTicker(symbol) {
   });
   if (r) return r;
 
-  // 3. CryptoCompare
+  // 2. MEXC ticker
+  r = await trySource('mexc', async () => {
+    const res = await fetch(`${MEXC}/api/v3/ticker/24hr?symbol=${symbol}`, { timeout: 5000 });
+    if (!res.ok) throw new Error(`MEXC ticker ${res.status}`);
+    return res.json();
+  });
+  if (r) return r;
+
+  // 3. OKX ticker
+  r = await trySource('okx', async () => {
+    const instId = okxSym(symbol);
+    const res = await fetch(`${OKX}/api/v5/market/ticker?instId=${instId}`, { timeout: 5000 });
+    if (!res.ok) throw new Error(`OKX ticker ${res.status}`);
+    const data = await res.json();
+    const t = data.data?.[0];
+    return t ? { lastPrice: t.last, priceChangePercent: (((+t.last - +t.open24h) / +t.open24h) * 100).toFixed(2),
+      highPrice: t.high24h, lowPrice: t.low24h, quoteVolume: t.volCcy24h } : null;
+  });
+  if (r) return r;
+
+  // 4. KuCoin ticker
+  r = await trySource('kucoin', async () => {
+    const sym = kucoinSym(symbol);
+    const res = await fetch(`${KUCOIN}/api/v1/market/stats?symbol=${sym}`, { timeout: 5000 });
+    if (!res.ok) throw new Error(`KuCoin ticker ${res.status}`);
+    const data = await res.json();
+    const t = data.data;
+    return t?.last ? { lastPrice: t.last, priceChangePercent: (+t.changeRate * 100).toFixed(2),
+      highPrice: t.high, lowPrice: t.low, quoteVolume: t.volValue } : null;
+  });
+  if (r) return r;
+
+  // 5. CryptoCompare ticker
   r = await trySource('cryptocompare', async () => {
     const fsym = ccSym(symbol);
     const res = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${fsym}&tsyms=USDT`, { timeout: 5000 });
@@ -275,15 +320,11 @@ async function getBinanceTicker(symbol) {
   });
   if (r) return r;
 
-  // 4. Yahoo Finance (last resort)
-  r = await trySource('yahoo', async () => {
-    const yf = yfSym(symbol);
-    const yfRes = await fetch(`${YAHOO}/${yf}?interval=1d&range=2d`, { timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!yfRes.ok) throw new Error(`YF ticker ${yfRes.status}`);
-    const yfData = await yfRes.json();
-    const meta = yfData.chart?.result?.[0]?.meta;
-    return meta?.regularMarketPrice ? { lastPrice: meta.regularMarketPrice.toString(), priceChangePercent: (meta.regularMarketChangePercent || 0).toFixed(2),
-      highPrice: meta.regularMarketDayHigh, lowPrice: meta.regularMarketDayLow, quoteVolume: meta.regularMarketVolume } : null;
+  // 6. Binance ticker — geo-blocked in Nigeria locally; works on cloud
+  r = await trySource('binance', async () => {
+    const res = await fetch(`${BINANCE}/api/v3/ticker/24hr?symbol=${symbol}`, { timeout: 5000 });
+    if (!res.ok) throw new Error(`Ticker ${res.status}`);
+    return res.json();
   });
   if (r) return r;
 
