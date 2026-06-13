@@ -80,6 +80,9 @@ const MTF_MAP    = { '15m': '1h', '1h': '4h', '4h': '1d', '1d': '1d' };
 const BINANCE    = 'https://api.binance.com';
 const BYBIT      = 'https://api.bybit.com';
 const BYBIT_TF   = { '15m':'15','1h':'60','4h':'240','1d':'D' };
+const MEXC       = 'https://api.mexc.com';
+const OKX        = 'https://www.okx.com';
+const OKX_TF     = { '15m':'15m','1h':'1H','4h':'4H','1d':'1D' };
 const TWELVE     = 'https://api.twelvedata.com';
 const CC_BASE    = 'https://min-api.cryptocompare.com/data/v2';
 const CC_TF      = { '15m':['histominute',15],'1h':['histohour',1],'4h':['histohour',4],'1d':['histoday',1] };
@@ -90,6 +93,7 @@ const YF_AGG     = { '4h':4 };
 
 function ccSym(symbol) { return symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol; }
 function yfSym(symbol) { return symbol.endsWith('USDT') ? `${symbol.slice(0,-4)}-USD` : symbol; }
+function okxSym(symbol) { return symbol.endsWith('USDT') ? symbol.slice(0,-4)+'-USDT' : symbol; }
 function aggregateCandles(candles, factor) {
   if (!factor || factor <= 1) return candles;
   const out = [];
@@ -117,7 +121,7 @@ const CANDLE_LIMIT = { '15m': 200, '1h': 200, '4h': 150, '1d': 100 };
 // source comes back (e.g. on a cloud host where Binance is reachable).
 const _src = {}; // name → { fails, until }
 function srcSkip(name){ const s=_src[name]; return !!(s && s.until > Date.now()); }
-function srcDown(name){ const s=_src[name]||(_src[name]={fails:0,until:0}); if(++s.fails>=3){ s.until=Date.now()+120000; console.warn(`[CB] ${name} circuit-broken for 2 min after ${s.fails} failures`); } }
+function srcDown(name){ const s=_src[name]||(_src[name]={fails:0,until:0}); if(++s.fails>=3){ s.until=Date.now()+300000; s.fails=0; console.warn(`[CB] ${name} circuit-broken for 5 min`); } }
 function srcUp(name){ _src[name]={fails:0,until:0}; }
 // 4xx errors mean the symbol doesn't exist on this source — don't penalise the source
 class SymbolNotFound extends Error {}
@@ -171,7 +175,35 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
-  // 3. CryptoCompare
+  // 3. MEXC (same REST format as Binance — drop-in)
+  r = await trySource('mexc', async () => {
+    const url = `${MEXC}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+    const res = await fetch(url, { timeout: 8000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`MEXC 4xx ${res.status} for ${symbol}`);
+    if (!res.ok) throw new Error(`MEXC ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data) || !data.length) return null;
+    return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+  });
+  if (r) return r;
+
+  // 4. OKX
+  r = await trySource('okx', async () => {
+    const instId = okxSym(symbol);
+    const bar    = OKX_TF[interval] || '1H';
+    const url    = `${OKX}/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`;
+    const res    = await fetch(url, { timeout: 10000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`OKX 4xx ${res.status} for ${symbol}`);
+    if (!res.ok) throw new Error(`OKX ${res.status}`);
+    const data = await res.json();
+    if (data.code !== '0' || !data.data?.length) return null;
+    return [...data.data].reverse().map(c => ({
+      time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5],
+    }));
+  });
+  if (r) return r;
+
+  // 5. CryptoCompare
   r = await trySource('cryptocompare', async () => {
     const [ep, agg] = CC_TF[interval] || ['histohour', 1];
     const fsym = ccSym(symbol);
@@ -189,7 +221,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
-  // 4. Yahoo Finance (last resort)
+  // 6. Yahoo Finance (last resort)
   r = await trySource('yahoo', async () => {
     const yf = yfSym(symbol);
     const yfRes = await fetch(
@@ -584,7 +616,8 @@ async function updateForexPrices() {
 // SIGNAL SCANNER (runs on intervals)
 // ═══════════════════════════════════════════════════════════════════
 
-// Scan a single pair across all timeframes — used by the parallel scanner
+// Throttle "all sources failed" noise — log once per pair per 10 min
+const _failLoggedAt = {};
 async function scanOnePair(pair) {
   for (const tf of TIMEFRAMES) {
     try {
@@ -595,12 +628,16 @@ async function scanOnePair(pair) {
         getBinanceKlines(pair.id, tf, limit),
         getBinanceKlines(pair.id, htfTf, htfLimit),
       ]);
-      // FIX 8: cache candles for structure-based trailing stop
       _candleCache[`${pair.id}_${tf}`] = candles;
       const newSigs = await engine.scanPair(candles, htfCandles, pair, tf, 'crypto');
       for (const sig of newSigs) await processNewSignal(sig);
     } catch (e) {
-      console.warn(`[Scan] ${pair.id} ${tf}:`, e.message);
+      const key = `${pair.id}_${tf}`;
+      const now = Date.now();
+      if (!_failLoggedAt[key] || now - _failLoggedAt[key] > 600000) {
+        console.warn(`[Scan] ${pair.id} ${tf}:`, e.message);
+        _failLoggedAt[key] = now;
+      }
     }
     await new Promise(r => setTimeout(r, 200));
   }
