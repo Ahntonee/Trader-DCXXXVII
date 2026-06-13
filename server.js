@@ -124,7 +124,7 @@ const CANDLE_LIMIT = { '15m': 200, '1h': 200, '4h': 150, '1d': 100 };
 // source comes back (e.g. on a cloud host where Binance is reachable).
 const _src = {}; // name → { fails, until }
 function srcSkip(name){ const s=_src[name]; return !!(s && s.until > Date.now()); }
-function srcDown(name){ const s=_src[name]||(_src[name]={fails:0,until:0}); if(++s.fails>=3){ s.until=Date.now()+300000; s.fails=0; console.warn(`[CB] ${name} circuit-broken for 5 min`); } }
+function srcDown(name){ const s=_src[name]||(_src[name]={fails:0,until:0}); if(++s.fails>=5){ s.until=Date.now()+300000; s.fails=0; console.warn(`[CB] ${name} circuit-broken for 5 min`); } }
 function srcUp(name){ _src[name]={fails:0,until:0}; }
 // 4xx errors mean the symbol doesn't exist on this source — don't penalise the source
 class SymbolNotFound extends Error {}
@@ -156,7 +156,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
   let r = await trySource('bybit', async () => {
     const btf = BYBIT_TF[interval] || '60';
     const url = `${BYBIT}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&limit=${limit}`;
-    const res = await fetch(url, { timeout: 8000 });
+    const res = await fetch(url, { timeout: 15000 });
     if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`Bybit 4xx ${res.status} for ${symbol}`);
     if (!res.ok) throw new Error(`Bybit ${res.status}`);
     const data = await res.json();
@@ -170,7 +170,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
   // 2. MEXC — works in Nigeria, Binance-compatible format
   r = await trySource('mexc', async () => {
     const url = `${MEXC}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, { timeout: 8000 });
+    const res = await fetch(url, { timeout: 15000 });
     if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`MEXC 4xx ${res.status} for ${symbol}`);
     if (!res.ok) throw new Error(`MEXC ${res.status}`);
     const data = await res.json();
@@ -184,7 +184,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
     const instId = okxSym(symbol);
     const bar    = OKX_TF[interval] || '1H';
     const url    = `${OKX}/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`;
-    const res    = await fetch(url, { timeout: 10000 });
+    const res    = await fetch(url, { timeout: 15000 });
     if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`OKX 4xx ${res.status} for ${symbol}`);
     if (!res.ok) throw new Error(`OKX ${res.status}`);
     const data = await res.json();
@@ -200,7 +200,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
     const sym  = kucoinSym(symbol);
     const type = KUCOIN_TF[interval] || '1hour';
     const url  = `${KUCOIN}/api/v1/market/candles?symbol=${sym}&type=${type}`;
-    const res  = await fetch(url, { timeout: 10000 });
+    const res  = await fetch(url, { timeout: 15000 });
     if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`KuCoin 4xx ${res.status} for ${symbol}`);
     if (!res.ok) throw new Error(`KuCoin ${res.status}`);
     const data = await res.json();
@@ -709,13 +709,13 @@ function expireBlackoutSignals() {
 async function scanCryptoSignals() {
   expireBlackoutSignals();
   db.expireOldSignals.run(Date.now());
-  const BATCH = 4;
+  const BATCH = 3; // 3 concurrent — less connection pressure on Nigerian network
   for (let i = 0; i < CRYPTO_PAIRS.length; i += BATCH) {
     const batch = CRYPTO_PAIRS.slice(i, i + BATCH);
     await Promise.all(batch.map(pair => scanOnePair(pair).catch(e =>
       console.warn(`[Scan] ${pair.id} batch error:`, e.message)
     )));
-    await new Promise(r => setTimeout(r, 500)); // gap between batches
+    await new Promise(r => setTimeout(r, 800)); // slightly longer gap between batches
   }
 }
 
@@ -987,10 +987,10 @@ async function start() {
   setInterval(updateForexPrices,  60 * 1000);    // forex prices every 60s
   setInterval(broadcastSessions,  60 * 1000);    // session update every minute
 
-  // Initial scans on startup
-  setTimeout(scanCryptoSignals, 3000);
-  setTimeout(scan15mFast,       8000);  // 15m first pass 8 s after full scan starts
-  setTimeout(updateCryptoPrices, 5000);
+  // Initial scans on startup — staggered to avoid flooding connections at boot
+  setTimeout(updateCryptoPrices,  5000);  // prices first (lightweight)
+  setTimeout(scanCryptoSignals,  20000);  // full scan after 20s
+  setTimeout(scan15mFast,        35000);  // 15m scan after full scan settles
 
   server.listen(PORT, HOST, () => {
     console.log(`\n🔺 APEX TERMINAL v2 running on http://${HOST}:${PORT}`);
