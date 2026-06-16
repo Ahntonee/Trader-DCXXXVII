@@ -24,6 +24,11 @@ const EXPIRY_MINS = { '15m': 120, '1h': 360, '4h': 960, '1d': 4320 };
 // MTF lookup: for each TF, which higher TF to confirm against
 const MTF_MAP = { '15m': '1h', '1h': '4h', '4h': '1d', '1d': '1d' };
 
+// Freshness cap: a CONFIRMED breakout sets entry at the live price. If price
+// has already run more than this fraction past the neckline, the entry is
+// chasing — drop it instead of handing over a stale, already-passed entry.
+const BREAKOUT_TOL = 0.006; // 0.6%
+
 // Reversal pattern names — used by session gate (Fix 5)
 const REVERSAL_PATTERNS = new Set([
   'Double Bottom', 'Double Top',
@@ -1054,6 +1059,16 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       // Reversal pattern or unbroken breakout: use existing confirmed/pending logic
       entry = confirmed ? close : neckline;
       entryMode = confirmed ? '✓ BREAKOUT CONFIRMED' : '⧗ AWAITING BREAK';
+    }
+
+    // ── Freshness cap (Fix): a confirmed breakout enters at the live price.
+    // If price has already run more than BREAKOUT_TOL past the neckline, the
+    // entry is chasing a move that's gone — drop it rather than hand over a
+    // stale, already-passed entry. Retest-confirmed entries are exempt: they
+    // are bounded to the neckline by the retest zone, so they're never stale.
+    if (entryMode === '✓ BREAKOUT CONFIRMED') {
+      const past = dir === 'long' ? (close - neckline) / neckline : (neckline - close) / neckline;
+      if (past > BREAKOUT_TOL) continue; // breakout already escaped — too late
     }
 
     // ── Structure-based SL ────────────────────────────────────────────
