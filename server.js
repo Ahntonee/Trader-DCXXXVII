@@ -85,6 +85,15 @@ const OKX        = 'https://www.okx.com';
 const OKX_TF     = { '15m':'15m','1h':'1H','4h':'4H','1d':'1D' };
 const KUCOIN     = 'https://api.kucoin.com';
 const KUCOIN_TF  = { '15m':'15min','1h':'1hour','4h':'4hour','1d':'1day' };
+const COINGECKO  = 'https://api.coingecko.com/api/v3';   // works in Nigeria; priority for tickers
+// Symbol → CoinGecko coin-id (ticker batch + 4h OHLC fallback). Unmapped = skipped.
+const CG_IDS = {
+  BTC:'bitcoin', ETH:'ethereum', SOL:'solana', BNB:'binancecoin', XRP:'ripple',
+  ADA:'cardano', DOGE:'dogecoin', AVAX:'avalanche-2', TRX:'tron', TON:'the-open-network',
+  HYPE:'hyperliquid', SUI:'sui', LINK:'chainlink', DOT:'polkadot', LTC:'litecoin',
+  ONDO:'ondo-finance', PEPE:'pepe', WIF:'dogwifcoin', NEAR:'near', INJ:'injective-protocol',
+  OP:'optimism', ARB:'arbitrum', JUP:'jupiter-exchange-solana', APT:'aptos', ATOM:'cosmos', TIA:'celestia',
+};
 const TWELVE     = 'https://api.twelvedata.com';
 const CC_BASE    = 'https://min-api.cryptocompare.com/data/v2';
 const CC_TF      = { '15m':['histominute',15],'1h':['histohour',1],'4h':['histohour',4],'1d':['histoday',1] };
@@ -97,6 +106,7 @@ function ccSym(symbol)     { return symbol.endsWith('USDT') ? symbol.slice(0, -4
 function yfSym(symbol)     { return symbol.endsWith('USDT') ? `${symbol.slice(0,-4)}-USD` : symbol; }
 function okxSym(symbol)    { return symbol.endsWith('USDT') ? symbol.slice(0,-4)+'-USDT' : symbol; }
 function kucoinSym(symbol) { return symbol.endsWith('USDT') ? symbol.slice(0,-4)+'-USDT' : symbol; }
+function cgId(symbol)      { return CG_IDS[ccSym(symbol)] || null; }
 function aggregateCandles(candles, factor) {
   if (!factor || factor <= 1) return candles;
   const out = [];
@@ -138,6 +148,26 @@ async function trySource(name, fn){
     if (e instanceof SymbolNotFound) return null; // symbol absent — don't trip breaker
     srcDown(name); return null;
   }
+}
+
+// CoinGecko batch ticker — ONE /coins/markets call covers every pair, cached
+// ~12s. Per-symbol calls would instantly hit the free rate limit; one batch
+// call per price cycle (~4/min) stays well under it. Throttles retries so a
+// failure doesn't hammer the endpoint.
+const _cgTick = { data: {}, ts: 0, lastAttempt: 0 };
+async function cgTickerBatch() {
+  if (Date.now() - _cgTick.ts < 12000 && Object.keys(_cgTick.data).length) return _cgTick.data;
+  if (Date.now() - _cgTick.lastAttempt < 12000) return _cgTick.data; // throttle (incl. after failures)
+  _cgTick.lastAttempt = Date.now();
+  const ids = [...new Set(Object.values(CG_IDS))].join(',');
+  const res = await fetch(`${COINGECKO}/coins/markets?vs_currency=usd&ids=${ids}&per_page=250`, { timeout: 12000 });
+  if (!res.ok) throw new Error(`CG markets ${res.status}`);
+  const arr = await res.json();
+  if (!Array.isArray(arr)) throw new Error('CG markets bad shape');
+  const map = {};
+  for (const c of arr) map[c.id] = c;
+  _cgTick.data = map; _cgTick.ts = Date.now();
+  return map;
 }
 
 // One retry on full-chain failure — most timeouts are transient network
@@ -230,6 +260,22 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
+  // 5b. CoinGecko — 4h ONLY (its OHLC granularity is locked; 4h is the one clean TF
+  //     it serves; no per-candle volume). A reliable Nigeria fallback for 4h.
+  if (interval === '4h') {
+    r = await trySource('coingecko', async () => {
+      const id = cgId(symbol);
+      if (!id) throw new SymbolNotFound(`no CG id for ${symbol}`);
+      const res = await fetch(`${COINGECKO}/coins/${id}/ohlc?vs_currency=usd&days=30`, { timeout: 12000 });
+      if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`CG 4xx ${res.status} for ${symbol}`);
+      if (!res.ok) throw new Error(`CG ohlc ${res.status}`);
+      const d = await res.json();
+      if (!Array.isArray(d) || !d.length) return null;
+      return d.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:0 })).slice(-limit);
+    });
+    if (r) return r;
+  }
+
   // 6. Yahoo Finance
   r = await trySource('yahoo', async () => {
     const yf = yfSym(symbol);
@@ -264,9 +310,23 @@ async function fetchKlinesChain(symbol, interval, limit) {
 }
 
 async function getBinanceTicker(symbol) {
-  // 1. Binance
-  // 1. Bybit ticker
-  let r = await trySource('bybit', async () => {
+  // 1. CoinGecko (priority — reliable in Nigeria; full 24h high/low/volume; batched + cached)
+  let r = await trySource('coingecko', async () => {
+    const id = cgId(symbol);
+    if (!id) throw new SymbolNotFound(`no CG id for ${symbol}`);
+    const map = await cgTickerBatch();
+    const c = map[id];
+    if (!c || c.current_price == null) return null;
+    return {
+      lastPrice: String(c.current_price),
+      priceChangePercent: (c.price_change_percentage_24h ?? 0).toFixed(2),
+      highPrice: c.high_24h, lowPrice: c.low_24h, quoteVolume: c.total_volume,
+    };
+  });
+  if (r) return r;
+
+  // 2. Bybit ticker
+  r = await trySource('bybit', async () => {
     const res = await fetch(`${BYBIT}/v5/market/tickers?category=spot&symbol=${symbol}`, { timeout: 5000 });
     if (!res.ok) throw new Error(`Bybit ticker ${res.status}`);
     const data = await res.json();
