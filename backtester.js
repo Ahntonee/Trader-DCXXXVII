@@ -20,23 +20,32 @@ const db = require('./db');
 // making the historical bonus/suppression system accurate.
 // ═══════════════════════════════════════════════════════════════════
 
-const BINANCE_BASE = 'https://api.binance.com';
-const BYBIT_BASE   = 'https://api.bybit.com';
-const BYBIT_TF     = { '15m': '15', '1h': '60', '4h': '240', '1d': 'D' };
-const CC_BBASE     = 'https://min-api.cryptocompare.com/data/v2';
-const CC_BTF       = { '15m':['histominute',15],'1h':['histohour',1],'4h':['histohour',4],'1d':['histoday',1] };
-const YF_BBASE     = 'https://query1.finance.yahoo.com/v8/finance/chart';
-const YF_BINT      = { '15m':'15m','1h':'1h','4h':'1h','1d':'1d' };
-const YF_BRANGE    = { '15m':'60d','1h':'2y','4h':'2y','1d':'5y' };
-const YF_BAGG      = { '4h':4 };
+// ── Exchange endpoints (Nigeria-friendly order — Binance geo-blocked NG) ──
+const BYBIT_BASE  = 'https://api.bybit.com';
+const BYBIT_TF    = { '15m':'15','1h':'60','4h':'240','1d':'D' };
+const MEXC_BASE   = 'https://api.mexc.com';
+const OKX_BASE    = 'https://www.okx.com';
+const OKX_BTF     = { '15m':'15m','1h':'1H','4h':'4H','1d':'1D' };
+const KUCOIN_BASE = 'https://api.kucoin.com';
+const KUCOIN_BTF  = { '15m':'15min','1h':'1hour','4h':'4hour','1d':'1day' };
+const CC_BBASE    = 'https://min-api.cryptocompare.com/data/v2';
+const CC_BTF      = { '15m':['histominute',15],'1h':['histohour',1],'4h':['histohour',4],'1d':['histoday',1] };
+const YF_BBASE    = 'https://query1.finance.yahoo.com/v8/finance/chart';
+const YF_BINT     = { '15m':'15m','1h':'1h','4h':'1h','1d':'1d' };
+const YF_BRANGE   = { '15m':'60d','1h':'2y','4h':'2y','1d':'5y' };
+const YF_BAGG     = { '4h':4 };
+const BINANCE_BASE = 'https://api.binance.com'; // last — geo-blocked in NG, works on cloud
+
+function bOkxSym(s)    { return s.endsWith('USDT') ? s.slice(0,-4)+'-USDT' : s; }
+function bKucoinSym(s) { return s.endsWith('USDT') ? s.slice(0,-4)+'-USDT' : s; }
+function bccSym(s)     { return s.endsWith('USDT') ? s.slice(0,-4) : s; }
+function byfSym(s)     { return s.endsWith('USDT') ? `${s.slice(0,-4)}-USD` : s; }
 
 function parseBybitCandles(list) {
   return [...list].reverse()
     .map(c => ({ time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
 }
 
-function bccSym(s) { return s.endsWith('USDT') ? s.slice(0, -4) : s; }
-function byfSym(s) { return s.endsWith('USDT') ? `${s.slice(0,-4)}-USD` : s; }
 function bAggregate(candles, factor) {
   if (!factor || factor <= 1) return candles;
   const out = [];
@@ -49,16 +58,155 @@ function bAggregate(candles, factor) {
   return out;
 }
 
+// Per-run dead-source set: once a source times out (geo-block), skip it for
+// the rest of the backtest instead of re-timing-out on every pair × TF.
+// Cleared at the start of each runBacktest. Cloud hosts (where exchanges
+// aren't blocked) never populate it, so they still get deep paginated history.
+const _btDead = new Set();
+async function tryHistSource(name, fn) {
+  if (_btDead.has(name)) return null;
+  try {
+    const candles = await fn();
+    if (candles && candles.length >= 100) {
+      console.log(`[Backtest] ${name}: ${candles.length} bars`);
+      return candles;
+    }
+    return null;
+  } catch (e) {
+    console.warn(`[Backtest] ${name} failed: ${e.message}`);
+    if (/timeout|ENOTFOUND|ECONNRESET|ECONNREFUSED|getaddrinfo|network|socket/i.test(e.message)) {
+      _btDead.add(name); // geo-blocked / unreachable — don't retry this run
+    }
+    return null;
+  }
+}
+
+// Source order: NG-working single-call sources FIRST (instant, no geo-block),
+// then the deep paginated exchanges (auto-skipped in NG after one timeout;
+// they supply multi-year history when the bot runs on a cloud host).
+async function fetchHistoricalKlines(symbol, interval, months = 18) {
+  const msPerBar  = { '15m':900000,'1h':3600000,'4h':14400000,'1d':86400000 }[interval] || 3600000;
+  const startTime = Date.now() - months * 30 * 24 * 3600000;
+  let c;
+  c = await tryHistSource('CryptoCompare', () => fetchCCKlines(symbol, interval));                       if (c) return c;
+  c = await tryHistSource('Yahoo',         () => fetchYFKlines(symbol, interval));                        if (c) return c;
+  c = await tryHistSource('Bybit',         () => fetchBybitHistorical(symbol, interval, startTime, msPerBar));  if (c) return c;
+  c = await tryHistSource('MEXC',          () => fetchMEXCHistorical(symbol, interval, startTime, msPerBar));   if (c) return c;
+  c = await tryHistSource('OKX',           () => fetchOKXHistorical(symbol, interval, startTime, msPerBar));    if (c) return c;
+  c = await tryHistSource('KuCoin',        () => fetchKuCoinHistorical(symbol, interval, startTime, msPerBar)); if (c) return c;
+  c = await tryHistSource('Binance',       () => fetchBinanceHistorical(symbol, interval, startTime, msPerBar));if (c) return c;
+  console.warn(`[Backtest] All sources failed for ${symbol} ${interval}`);
+  return [];
+}
+
+async function fetchBybitHistorical(symbol, interval, startTime, msPerBar) {
+  const allCandles = [];
+  let start = startTime;
+  const btf = BYBIT_TF[interval] || '60';
+  while (start < Date.now() - msPerBar * 2) {
+    const end = start + 1000 * msPerBar;
+    const url = `${BYBIT_BASE}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&start=${start}&end=${end}&limit=1000`;
+    const res = await fetch(url, { timeout: 15000 });
+    if (!res.ok) throw new Error(`Bybit ${res.status}`);
+    const data = await res.json();
+    if (data.retCode !== 0 || !data.result?.list?.length) break;
+    const batch = parseBybitCandles(data.result.list);
+    batch.forEach(c => allCandles.push(c));
+    start = +data.result.list[0][0] + msPerBar;
+    await sleep(150);
+  }
+  return allCandles;
+}
+
+async function fetchMEXCHistorical(symbol, interval, startTime, msPerBar) {
+  const allCandles = [];
+  let start = startTime;
+  while (start < Date.now() - msPerBar * 2) {
+    const url = `${MEXC_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${start}&limit=1000`;
+    const res = await fetch(url, { timeout: 15000 });
+    if (!res.ok) throw new Error(`MEXC ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data) || !data.length) break;
+    const batch = data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+    batch.forEach(c => allCandles.push(c));
+    start = data[data.length-1][0] + msPerBar;
+    await sleep(150);
+  }
+  return allCandles;
+}
+
+async function fetchOKXHistorical(symbol, interval, startTime, msPerBar) {
+  const allCandles = [];
+  let after = ''; // OKX uses cursor-based pagination
+  const bar = OKX_BTF[interval] || '1H';
+  const instId = bOkxSym(symbol);
+  while (true) {
+    const url = `${OKX_BASE}/api/v5/market/history-candles?instId=${instId}&bar=${bar}&limit=300${after ? '&after='+after : ''}`;
+    const res = await fetch(url, { timeout: 15000 });
+    if (!res.ok) throw new Error(`OKX ${res.status}`);
+    const data = await res.json();
+    if (data.code !== '0' || !data.data?.length) break;
+    const batch = [...data.data].reverse().map(c => ({
+      time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5],
+    }));
+    batch.forEach(c => allCandles.push(c));
+    const oldest = +data.data[data.data.length-1][0];
+    if (oldest <= startTime) break;
+    after = oldest.toString();
+    await sleep(150);
+  }
+  return allCandles.filter(c => c.time * 1000 >= startTime).sort((a,b) => a.time - b.time);
+}
+
+async function fetchKuCoinHistorical(symbol, interval, startTime, msPerBar) {
+  const allCandles = [];
+  const type = KUCOIN_BTF[interval] || '1hour';
+  const sym  = bKucoinSym(symbol);
+  let start  = Math.floor(startTime / 1000);
+  while (start < Math.floor(Date.now() / 1000) - msPerBar/1000 * 2) {
+    const end = start + Math.floor(msPerBar / 1000) * 1500;
+    const url = `${KUCOIN_BASE}/api/v1/market/candles?symbol=${sym}&type=${type}&startAt=${start}&endAt=${end}`;
+    const res = await fetch(url, { timeout: 15000 });
+    if (!res.ok) throw new Error(`KuCoin ${res.status}`);
+    const data = await res.json();
+    if (data.code !== '200000' || !data.data?.length) break;
+    const batch = [...data.data].reverse().map(c => ({
+      time: +c[0], open:+c[1], close:+c[2], high:+c[3], low:+c[4], volume:+c[5],
+    }));
+    batch.forEach(c => allCandles.push(c));
+    start = batch[batch.length-1].time + Math.floor(msPerBar/1000);
+    await sleep(150);
+  }
+  return allCandles;
+}
+
+async function fetchBinanceHistorical(symbol, interval, startTime, msPerBar) {
+  const allCandles = [];
+  let start = startTime;
+  while (start < Date.now() - msPerBar * 2) {
+    const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${start}&limit=1000`;
+    const res = await fetch(url, { timeout: 15000 });
+    if (!res.ok) throw new Error(`Binance ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data) || !data.length) break;
+    const batch = data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+    batch.forEach(c => allCandles.push(c));
+    start = data[data.length-1][0] + msPerBar;
+    await sleep(150);
+  }
+  return allCandles;
+}
+
+const CC_KEY = process.env.CRYPTOCOMPARE_KEY || ''; // shared with server (dotenv loaded there)
 async function fetchCCKlines(symbol, interval) {
   const [ep, agg] = CC_BTF[interval] || ['histohour', 1];
   const fsym = bccSym(symbol);
-  const url = `${CC_BBASE}/${ep}?fsym=${fsym}&tsym=USDT&limit=2000&aggregate=${agg}`;
+  const url = `${CC_BBASE}/${ep}?fsym=${fsym}&tsym=USDT&limit=2000&aggregate=${agg}${CC_KEY ? '&api_key=' + CC_KEY : ''}`;
   const res = await fetch(url, { timeout: 15000 });
   if (!res.ok) throw new Error(`CC ${res.status}`);
   const data = await res.json();
   if (data.Response !== 'Success') throw new Error(`CC: ${data.Message}`);
-  return (data.Data?.Data || [])
-    .filter(c => c.close > 0)
+  return (data.Data?.Data || []).filter(c => c.close > 0)
     .map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volumefrom }));
 }
 
@@ -76,88 +224,47 @@ async function fetchYFKlines(symbol, interval) {
   return bAggregate(candles, YF_BAGG[interval] || 1);
 }
 
-async function fetchHistoricalKlines(symbol, interval, months = 24) {
-  const allCandles = [];
-  const msPerBar = { '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[interval] || 3600000;
-  const totalMs = months * 30 * 24 * 3600000;
-  let startTime = Date.now() - totalMs;
-  let useBybit = false, bybitTried = false;
-
-  while (startTime < Date.now() - msPerBar * 2) {
-    try {
-      let batch, nextStart;
-      if (!useBybit) {
-        const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${startTime}&limit=1000`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Binance ${res.status}`);
-        const data = await res.json();
-        if (!Array.isArray(data) || !data.length) break;
-        batch = data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
-        nextStart = data[data.length-1][0] + msPerBar;
-      } else {
-        const btf = BYBIT_TF[interval] || '60';
-        const endTime = startTime + 1000 * msPerBar;
-        const url = `${BYBIT_BASE}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&start=${startTime}&end=${endTime}&limit=1000`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Bybit ${res.status}`);
-        const data = await res.json();
-        if (data.retCode !== 0 || !data.result?.list?.length) break;
-        batch = parseBybitCandles(data.result.list);
-        nextStart = +data.result.list[0][0] + msPerBar;
-      }
-      batch.forEach(c => allCandles.push(c));
-      startTime = nextStart;
-      await sleep(120);
-    } catch (e) {
-      if (!useBybit) {
-        console.warn(`[Backtest] Binance unavailable, trying Bybit: ${e.message}`);
-        useBybit = true;
-      } else if (!bybitTried) {
-        bybitTried = true;
-        console.warn(`[Backtest] Bybit also unavailable for ${symbol} ${interval}, trying CC → YF`);
-        try {
-          const cc = await fetchCCKlines(symbol, interval);
-          cc.forEach(c => allCandles.push(c));
-          console.log(`[Backtest] CryptoCompare: ${cc.length} bars for ${symbol} ${interval}`);
-        } catch (ccErr) {
-          console.warn(`[Backtest] CC failed (${ccErr.message}), trying Yahoo Finance`);
-          try {
-            const yf = await fetchYFKlines(symbol, interval);
-            yf.forEach(c => allCandles.push(c));
-            console.log(`[Backtest] Yahoo Finance: ${yf.length} bars for ${symbol} ${interval}`);
-          } catch (yfErr) {
-            console.warn(`[Backtest] Yahoo Finance failed: ${yfErr.message}`);
-          }
-        }
-        break;
-      } else {
-        break;
-      }
-    }
-  }
-  return allCandles;
-}
-
+// HTF candles for backtester (recent 200 bars only — same source priority)
 async function fetchHTFCandles(symbol, htfInterval) {
-  try {
-    const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${htfInterval}&limit=200`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Binance ${res.status}`);
-    const data = await res.json();
-    return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
-  } catch {
-    try {
+  const sources = [
+    async () => {
       const btf = BYBIT_TF[htfInterval] || '60';
       const url = `${BYBIT_BASE}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&limit=200`;
-      const res = await fetch(url);
+      const res = await fetch(url, { timeout: 15000 });
       const data = await res.json();
       if (data.retCode !== 0) throw new Error('Bybit failed');
       return parseBybitCandles(data.result?.list || []);
-    } catch {
-      try { return await fetchCCKlines(symbol, htfInterval); } catch { }
-      return fetchYFKlines(symbol, htfInterval).catch(() => []);
-    }
+    },
+    async () => {
+      const url = `${MEXC_BASE}/api/v3/klines?symbol=${symbol}&interval=${htfInterval}&limit=200`;
+      const res = await fetch(url, { timeout: 15000 });
+      if (!res.ok) throw new Error(`MEXC ${res.status}`);
+      const data = await res.json();
+      return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+    },
+    async () => {
+      const instId = bOkxSym(symbol);
+      const bar = OKX_BTF[htfInterval] || '1H';
+      const url = `${OKX_BASE}/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=200`;
+      const res = await fetch(url, { timeout: 15000 });
+      const data = await res.json();
+      if (data.code !== '0') throw new Error('OKX failed');
+      return [...data.data].reverse().map(c => ({ time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+    },
+    () => fetchCCKlines(symbol, htfInterval),
+    () => fetchYFKlines(symbol, htfInterval),
+    async () => {
+      const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${htfInterval}&limit=200`;
+      const res = await fetch(url, { timeout: 15000 });
+      if (!res.ok) throw new Error(`Binance ${res.status}`);
+      const data = await res.json();
+      return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+    },
+  ];
+  for (const src of sources) {
+    try { const r = await src(); if (r?.length) return r; } catch { }
   }
+  return [];
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -185,6 +292,7 @@ const MTF_MAP = { '15m': '1h', '1h': '4h', '4h': '1d', '1d': '1d' };
 
 async function runBacktest(pairs, timeframes, onProgress) {
   const runAt = Date.now();
+  _btDead.clear(); // fresh source-health slate each run
   const allResults = [];
   let progressCount = 0;
   const total = pairs.length * timeframes.length;

@@ -24,6 +24,7 @@ const PORT       = process.env.PORT || 3000;
 // On Render/cloud HOST must be 0.0.0.0; for local installs keep 127.0.0.1
 const HOST       = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 const TWELVE_KEY = process.env.TWELVE_DATA_KEY || '';
+const CC_KEY     = process.env.CRYPTOCOMPARE_KEY || ''; // free key restores CryptoCompare (now 401 without one)
 
 // ── Input validation helpers ──────────────────────────────────────
 const VALID_SYMBOL   = /^[A-Z0-9]{2,20}(\/[A-Z]{2,6})?$/; // e.g. BTCUSDT or XAU/USD
@@ -182,71 +183,12 @@ async function getBinanceKlines(symbol, interval, limit) {
 }
 
 async function fetchKlinesChain(symbol, interval, limit) {
-  // 1. Bybit — works in Nigeria, no geo-block
-  let r = await trySource('bybit', async () => {
-    const btf = BYBIT_TF[interval] || '60';
-    const url = `${BYBIT}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&limit=${limit}`;
-    const res = await fetch(url, { timeout: 15000 });
-    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`Bybit 4xx ${res.status} for ${symbol}`);
-    if (!res.ok) throw new Error(`Bybit ${res.status}`);
-    const data = await res.json();
-    if (data.retCode !== 0) throw new Error(`Bybit: ${data.retMsg}`);
-    const candles = [...(data.result?.list || [])].reverse()
-      .map(c => ({ time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
-    return candles.length ? candles : null;
-  });
-  if (r) return r;
-
-  // 2. MEXC — works in Nigeria, Binance-compatible format
-  r = await trySource('mexc', async () => {
-    const url = `${MEXC}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, { timeout: 15000 });
-    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`MEXC 4xx ${res.status} for ${symbol}`);
-    if (!res.ok) throw new Error(`MEXC ${res.status}`);
-    const data = await res.json();
-    if (!Array.isArray(data) || !data.length) return null;
-    return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
-  });
-  if (r) return r;
-
-  // 3. OKX — works in Nigeria
-  r = await trySource('okx', async () => {
-    const instId = okxSym(symbol);
-    const bar    = OKX_TF[interval] || '1H';
-    const url    = `${OKX}/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`;
-    const res    = await fetch(url, { timeout: 15000 });
-    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`OKX 4xx ${res.status} for ${symbol}`);
-    if (!res.ok) throw new Error(`OKX ${res.status}`);
-    const data = await res.json();
-    if (data.code !== '0' || !data.data?.length) return null;
-    return [...data.data].reverse().map(c => ({
-      time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5],
-    }));
-  });
-  if (r) return r;
-
-  // 4. KuCoin — works in Nigeria
-  r = await trySource('kucoin', async () => {
-    const sym  = kucoinSym(symbol);
-    const type = KUCOIN_TF[interval] || '1hour';
-    const url  = `${KUCOIN}/api/v1/market/candles?symbol=${sym}&type=${type}`;
-    const res  = await fetch(url, { timeout: 15000 });
-    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`KuCoin 4xx ${res.status} for ${symbol}`);
-    if (!res.ok) throw new Error(`KuCoin ${res.status}`);
-    const data = await res.json();
-    if (data.code !== '200000' || !data.data?.length) return null;
-    // KuCoin returns newest-first — reverse, then trim to limit
-    return [...data.data].reverse().slice(-limit).map(c => ({
-      time: +c[0], open:+c[1], close:+c[2], high:+c[3], low:+c[4], volume:+c[5],
-    }));
-  });
-  if (r) return r;
-
-  // 5. CryptoCompare — data API, no geo-block
-  r = await trySource('cryptocompare', async () => {
+  // NG-reachable sources FIRST so we don't time out on geo-blocked exchanges.
+  // 1. CryptoCompare — reachable in NG; needs a free API key (401 without one).
+  let r = await trySource('cryptocompare', async () => {
     const [ep, agg] = CC_TF[interval] || ['histohour', 1];
     const fsym = ccSym(symbol);
-    const url = `${CC_BASE}/${ep}?fsym=${fsym}&tsym=USDT&limit=${limit}&aggregate=${agg}`;
+    const url = `${CC_BASE}/${ep}?fsym=${fsym}&tsym=USDT&limit=${limit}&aggregate=${agg}${CC_KEY ? '&api_key=' + CC_KEY : ''}`;
     const res = await fetch(url, { timeout: 10000 });
     if (!res.ok) throw new Error(`CC ${res.status}`);
     const data = await res.json();
@@ -260,8 +202,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
-  // 5b. CoinGecko — 4h ONLY (its OHLC granularity is locked; 4h is the one clean TF
-  //     it serves; no per-candle volume). A reliable Nigeria fallback for 4h.
+  // 2. CoinGecko — 4h ONLY (OHLC granularity locked; no per-candle volume). Reliable in NG.
   if (interval === '4h') {
     r = await trySource('coingecko', async () => {
       const id = cgId(symbol);
@@ -276,7 +217,7 @@ async function fetchKlinesChain(symbol, interval, limit) {
     if (r) return r;
   }
 
-  // 6. Yahoo Finance
+  // 3. Yahoo Finance — keyless, works in NG (rate-limit-prone under heavy load)
   r = await trySource('yahoo', async () => {
     const yf = yfSym(symbol);
     const yfRes = await fetch(
@@ -295,7 +236,67 @@ async function fetchKlinesChain(symbol, interval, limit) {
   });
   if (r) return r;
 
-  // 7. Binance — geo-blocked in Nigeria locally; works when deployed to cloud
+  // 4. Bybit — geo-blocked in NG (circuit-broken after repeated fails); works on cloud
+  r = await trySource('bybit', async () => {
+    const btf = BYBIT_TF[interval] || '60';
+    const url = `${BYBIT}/v5/market/kline?category=spot&symbol=${symbol}&interval=${btf}&limit=${limit}`;
+    const res = await fetch(url, { timeout: 15000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`Bybit 4xx ${res.status} for ${symbol}`);
+    if (!res.ok) throw new Error(`Bybit ${res.status}`);
+    const data = await res.json();
+    if (data.retCode !== 0) throw new Error(`Bybit: ${data.retMsg}`);
+    const candles = [...(data.result?.list || [])].reverse()
+      .map(c => ({ time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+    return candles.length ? candles : null;
+  });
+  if (r) return r;
+
+  // 5. MEXC — geo-blocked in NG; works on cloud (Binance-compatible format)
+  r = await trySource('mexc', async () => {
+    const url = `${MEXC}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+    const res = await fetch(url, { timeout: 15000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`MEXC 4xx ${res.status} for ${symbol}`);
+    if (!res.ok) throw new Error(`MEXC ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data) || !data.length) return null;
+    return data.map(c => ({ time: Math.floor(c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] }));
+  });
+  if (r) return r;
+
+  // 6. OKX — geo-blocked in NG; works on cloud
+  r = await trySource('okx', async () => {
+    const instId = okxSym(symbol);
+    const bar    = OKX_TF[interval] || '1H';
+    const url    = `${OKX}/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`;
+    const res    = await fetch(url, { timeout: 15000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`OKX 4xx ${res.status} for ${symbol}`);
+    if (!res.ok) throw new Error(`OKX ${res.status}`);
+    const data = await res.json();
+    if (data.code !== '0' || !data.data?.length) return null;
+    return [...data.data].reverse().map(c => ({
+      time: Math.floor(+c[0]/1000), open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5],
+    }));
+  });
+  if (r) return r;
+
+  // 7. KuCoin — geo-blocked in NG; works on cloud
+  r = await trySource('kucoin', async () => {
+    const sym  = kucoinSym(symbol);
+    const type = KUCOIN_TF[interval] || '1hour';
+    const url  = `${KUCOIN}/api/v1/market/candles?symbol=${sym}&type=${type}`;
+    const res  = await fetch(url, { timeout: 15000 });
+    if (res.status >= 400 && res.status < 500) throw new SymbolNotFound(`KuCoin 4xx ${res.status} for ${symbol}`);
+    if (!res.ok) throw new Error(`KuCoin ${res.status}`);
+    const data = await res.json();
+    if (data.code !== '200000' || !data.data?.length) return null;
+    // KuCoin returns newest-first — reverse, then trim to limit
+    return [...data.data].reverse().slice(-limit).map(c => ({
+      time: +c[0], open:+c[1], close:+c[2], high:+c[3], low:+c[4], volume:+c[5],
+    }));
+  });
+  if (r) return r;
+
+  // 8. Binance — geo-blocked in NG locally; works when deployed to cloud
   r = await trySource('binance', async () => {
     const url = `${BINANCE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const res = await fetch(url, { timeout: 8000 });
@@ -371,7 +372,7 @@ async function getBinanceTicker(symbol) {
   // 5. CryptoCompare ticker
   r = await trySource('cryptocompare', async () => {
     const fsym = ccSym(symbol);
-    const res = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${fsym}&tsyms=USDT`, { timeout: 5000 });
+    const res = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${fsym}&tsyms=USDT${CC_KEY ? '&api_key=' + CC_KEY : ''}`, { timeout: 5000 });
     if (!res.ok) throw new Error(`CC ticker ${res.status}`);
     const data = await res.json();
     const info = data.RAW?.[fsym]?.USDT;
