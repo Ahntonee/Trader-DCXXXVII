@@ -193,6 +193,11 @@ const getTodaySummary = db.prepare(`
   FROM signals
 `);
 
+// Wraps any function in a SQLite transaction — all writes succeed or none do.
+// Protects multi-step operations (TP1 hit: journal + SL update + stat) from
+// leaving the DB in a partial state if the process crashes mid-way.
+function withTransaction(fn) { return db.transaction(fn)(); }
+
 module.exports = {
   insertSignal,
   updateSignalStatus,
@@ -212,5 +217,6 @@ module.exports = {
   getBacktestResults,
   getSignalSummary,
   getTodaySummary,
+  withTransaction,
   db,
 };
