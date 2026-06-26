@@ -155,16 +155,16 @@ function handleSignalUpdate(sig, updates) {
     });
     broadcast({ type: 'signal_update', id: sig.id, updates });
 
-    // ── TP1 HIT: lock 30% at +1.0R, arm structure trailing stop ──────
+    // ── TP1 HIT: lock 50% at +1.0R, move SL to TP1 price ────────────
+    // SL moves to TP1 (not entry) — if price returns to TP1 the remainder
+    // closes at breakeven; the TP1 win is already in the journal.
     if (updates.status === 'tp1_hit') {
       const entryPx   = updates.entry_price ?? sig.entry_price ?? sig.entry;
       const exitPrice = updates.close_price || sig.tp1;
 
-      // Set trail stop to breakeven — structure trail will only move it in favour
-      db.updateSignalSL.run({ id: sig.id, sl: entryPx });
-      broadcast({ type: 'signal_update', id: sig.id, updates: { sl: entryPx } });
+      db.updateSignalSL.run({ id: sig.id, sl: sig.tp1 });
+      broadcast({ type: 'signal_update', id: sig.id, updates: { sl: sig.tp1 } });
 
-      // Journal: 30% partial exit at 1.0R (tiered exit v3)
       const pnlPct = entryPx > 0 ? ((exitPrice - entryPx) / entryPx * (sig.dir === 'long' ? 100 : -100)) : 0;
       db.insertJournal.run({
         signal_id: sig.id, sym: sig.sym, tf: sig.tf, dir: sig.dir,
@@ -184,30 +184,37 @@ function handleSignalUpdate(sig, updates) {
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
       broadcast({ type: 'summary_init', data: summaryPayload() });
       tg.sendMessage(tg.formatTPHit(sig, 'tp1'));
-      console.log(`[TRAIL] ${sig.sym} TP1 hit — 30% locked +1.0R, structure trailing stop armed at breakeven`);
+      console.log(`[TP1] ${sig.sym} — 50% locked +1.0R, SL moved to TP1 price (${sig.tp1})`);
     }
 
-    // ── TRAIL CLOSE or TP2: log remaining position ────────────────
+    // ── TP2 or BE CLOSE: handle remaining 50% ────────────────────────
+    // tp2_hit  → full win, close signal
+    // sl_hit after tp1_hit → price returned to TP1 (new SL) → breakeven
+    //   close on remainder. TP1 win already counted. Not a loss.
     if (['tp2_hit', 'sl_hit'].includes(updates.status)) {
       const wasTrailing = sig.status === 'tp1_hit';
       const entryPx    = sig.entry_price ?? sig.entry;
       const exitPrice  = updates.close_price ?? (updates.status === 'sl_hit' ? sig.sl : sig.tp2);
 
-      let rMult;
+      let rMult, outcome;
+
       if (wasTrailing) {
-        // risk unit is 1.0R (TP1 = 1.0R in v3)
-        const risk = Math.abs(sig.tp1 - sig.entry) / 1.0;
-        rMult = risk > 0
-          ? (sig.dir === 'long' ? (exitPrice - entryPx) : (entryPx - exitPrice)) / risk
-          : 0;
-        rMult = Math.max(0, +rMult.toFixed(3));
+        if (updates.status === 'tp2_hit') {
+          const risk = Math.abs(sig.tp1 - sig.entry);
+          rMult   = risk > 0
+            ? Math.max(0, +((sig.dir === 'long' ? exitPrice - entryPx : entryPx - exitPrice) / risk).toFixed(3))
+            : 2.0;
+          outcome = 'tp2';
+        } else {
+          // Returned to TP1 — remainder exits at breakeven, signal closed cleanly
+          rMult   = 0;
+          outcome = 'be';
+        }
       } else {
-        rMult = updates.status === 'sl_hit' ? -1 : 2.0; // TP2 is 2.0R in v3
+        rMult   = updates.status === 'sl_hit' ? -1 : 2.0;
+        outcome = updates.status.replace('_hit', '');
       }
 
-      const outcome = wasTrailing
-        ? (updates.status === 'tp2_hit' ? 'tp2' : 'trail')
-        : updates.status.replace('_hit', '');
       const pnlPct = entryPx > 0
         ? ((exitPrice - entryPx) / entryPx * (sig.dir === 'long' ? 100 : -100))
         : 0;
@@ -223,20 +230,29 @@ function handleSignalUpdate(sig, updates) {
         closed_at: updates.closed_at,
         date: new Date().toISOString().slice(0, 10),
       });
-      db.upsertPatternStat.run({
-        pattern: sig.pattern, tf: sig.tf, asset_class: sig.asset_class || 'crypto',
-        wins: rMult > 0 ? 1 : 0, losses: rMult <= 0 ? 1 : 0,
-        total_r: rMult, count: 1,
-        win_rate: rMult > 0 ? 1 : 0, avg_r: rMult,
-      });
+
+      // BE close is neutral — don't skew pattern stats with a 0R entry
+      if (outcome !== 'be') {
+        db.upsertPatternStat.run({
+          pattern: sig.pattern, tf: sig.tf, asset_class: sig.asset_class || 'crypto',
+          wins: rMult > 0 ? 1 : 0, losses: rMult < 0 ? 1 : 0,
+          total_r: rMult, count: 1,
+          win_rate: rMult > 0 ? 1 : 0, avg_r: rMult,
+        });
+      }
+
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
       broadcast({ type: 'summary_init', data: summaryPayload() });
 
-      if (updates.status === 'sl_hit') tg.sendMessage(tg.formatSLHit(sig));
-      else tg.sendMessage(tg.formatTPHit(sig, outcome));
-
-      if (wasTrailing)
-        console.log(`[TRAIL] ${sig.sym} trail closed — 50% at ${rMult >= 0 ? '+' : ''}${rMult}R (exit: ${exitPrice})`);
+      if (wasTrailing && updates.status === 'sl_hit') {
+        tg.sendMessage(`🔒 ${sig.sym} ${sig.tf} — remainder closed at breakeven (TP1 win protected)`);
+        console.log(`[BE] ${sig.sym} — price returned to TP1, remainder closed at breakeven. TP1 win preserved.`);
+      } else if (updates.status === 'sl_hit') {
+        tg.sendMessage(tg.formatSLHit(sig));
+      } else {
+        tg.sendMessage(tg.formatTPHit(sig, outcome));
+        if (wasTrailing) console.log(`[TP2] ${sig.sym} — remaining 50% closed at +${rMult}R`);
+      }
     }
   } catch (e) {
     console.warn('[handleSignalUpdate] error:', e.message);
