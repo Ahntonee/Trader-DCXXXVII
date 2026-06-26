@@ -9,8 +9,7 @@ require('dotenv').config();
 
 const PORT       = process.env.PORT || 3000;
 const HOST       = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
-const TWELVE_KEY = process.env.TWELVE_DATA_KEY    || '';
-const CC_KEY     = process.env.CRYPTOCOMPARE_KEY  || '';
+const TWELVE_KEY = process.env.TWELVE_DATA_KEY || '';
 
 // ── Input validation ─────────────────────────────────────────────
 const VALID_SYMBOL   = /^[A-Z0-9]{2,20}(\/[A-Z]{2,6})?$/;
@@ -68,7 +67,7 @@ const FAST_SCAN_BATCH_SIZE = 6;   // concurrent pairs per 15m fast-scan batch
 const BACKTEST_COOLDOWN_MS = 10 * 60 * 1000; // 10 min between backtest runs
 
 module.exports = {
-  PORT, HOST, TWELVE_KEY, CC_KEY,
+  PORT, HOST, TWELVE_KEY,
   VALID_SYMBOL, VALID_INTERVAL, sanitizeLimit,
   CRYPTO_PAIRS, FOREX_PAIRS,
   TIMEFRAMES, MTF_MAP, CANDLE_LIMIT, EXPIRY_MINS,
