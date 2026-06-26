@@ -457,6 +457,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
             <button class="pos-action-btn clear" id="posClearBtn">CLEAR</button>
           </div>
         </div>
+        <!-- SMC Analysis Overlay -->
+        <div id="smcOverlay" style="display:none;position:absolute;bottom:0;left:0;width:180px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:10px;z-index:20;max-height:70%;overflow-y:auto;font-family:'JetBrains Mono',monospace;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-size:8px;letter-spacing:1.5px;color:var(--accent);font-weight:700;">SMC ANALYSIS</span>
+            <button onclick="document.getElementById('smcOverlay').style.display='none';" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:0;line-height:1;">✕</button>
+          </div>
+          <div id="smcPanel" style="font-size:9px;color:var(--text);"></div>
+        </div>
       </div>
       <div class="rsi-panel" id="rsiPanel"><div class="rsi-label">RSI (14)</div><div id="rsiChart"></div></div>
       <div class="macd-panel" id="macdPanel"><div class="macd-label">MACD</div><div id="macdChart"></div></div>
@@ -854,6 +862,7 @@ async function loadPair(pair, tf) {
     updateIndicators(cs);
     nashZones=detectNashZones(cs,80);
     renderNashPanel(); drawNashZonesOnChart();
+    if (showSMC) drawSMCOverlays();
     chart.timeScale().setVisibleLogicalRange({from:cs.length-80,to:cs.length+3});
     // Draw signal lines for this pair
     refreshSignalLines();
@@ -1234,6 +1243,296 @@ function clearSMC() {
   _smcSeries.forEach(s=>{try{chart.removeSeries(s);}catch(e){}});
   _smcPriceLines.forEach(l=>{try{candleSeries.removePriceLine(l);}catch(e){}});
   _smcSeries=[]; _smcPriceLines=[];
+  const ov=document.getElementById('smcOverlay'); if(ov) ov.style.display='none';
+}
+
+// ─── SMC DETECTION ENGINE ────────────────────────────────────
+function _smcSwings(cs, left=3, right=2) {
+  const highs=[], lows=[], n=cs.length;
+  for (let i=left; i<n-right; i++) {
+    let isHigh=true, isLow=true;
+    for (let j=i-left; j<=i+right; j++) {
+      if (j===i) continue;
+      if (cs[j].high>=cs[i].high) isHigh=false;
+      if (cs[j].low <=cs[i].low)  isLow=false;
+    }
+    if (isHigh) highs.push({i,time:cs[i].time,price:cs[i].high});
+    if (isLow)  lows.push({i,time:cs[i].time,price:cs[i].low});
+  }
+  return {highs,lows};
+}
+
+function _smcOBs(cs, swings) {
+  const obs=[]; const n=cs.length;
+  const lookback=Math.min(n-1,80), start=n-lookback;
+  for (let i=start; i<n-4; i++) {
+    const c=cs[i];
+    if (c.close<c.open) { // bearish candle → potential bullish OB
+      let imp=0;
+      for (let j=i+1; j<Math.min(i+6,n); j++) if(cs[j].close>cs[j].open) imp++;
+      if (imp>=2) obs.push({type:'bull',time:c.time,timeEnd:cs[Math.min(n-1,i+25)].time,lo:Math.min(c.open,c.close),hi:Math.max(c.open,c.close),idx:i});
+    }
+    if (c.close>c.open) { // bullish candle → potential bearish OB
+      let imp=0;
+      for (let j=i+1; j<Math.min(i+6,n); j++) if(cs[j].close<cs[j].open) imp++;
+      if (imp>=2) obs.push({type:'bear',time:c.time,timeEnd:cs[Math.min(n-1,i+25)].time,lo:Math.min(c.open,c.close),hi:Math.max(c.open,c.close),idx:i});
+    }
+  }
+  const close=cs[n-1].close;
+  const bull=obs.filter(o=>o.type==='bull'&&close>o.lo).slice(-3);
+  const bear=obs.filter(o=>o.type==='bear'&&close<o.hi).slice(-3);
+  return [...bull,...bear];
+}
+
+function _smcFVGs(cs) {
+  const fvgs=[]; const n=cs.length;
+  const lookback=Math.min(n,60), close=cs[n-1].close;
+  for (let k=1; k<lookback-1; k++) {
+    const idx=n-lookback+k;
+    if (idx<1||idx>=n-1) continue;
+    const prev=cs[idx-1], curr=cs[idx], next=cs[idx+1];
+    if (next.low>prev.high&&curr.close>curr.open&&close>prev.high)
+      fvgs.push({type:'bull',time:curr.time,timeEnd:cs[n-1].time,lo:prev.high,hi:next.low,idx});
+    if (next.high<prev.low&&curr.close<curr.open&&close<prev.low)
+      fvgs.push({type:'bear',time:curr.time,timeEnd:cs[n-1].time,lo:next.high,hi:prev.low,idx});
+  }
+  return fvgs.slice(-5);
+}
+
+function _smcBOSChoCh(cs, swings) {
+  const events=[]; const n=cs.length; if(n<20) return events;
+  const slice=cs.slice(Math.max(0,n-30));
+  const trendUp=slice[slice.length-1].close>slice[0].close;
+  const rH=swings.highs.filter(h=>h.i>n-45&&h.i<n-2).slice(-4);
+  const rL=swings.lows.filter(l=>l.i>n-45&&l.i<n-2).slice(-4);
+  for (let i=Math.max(1,n-25); i<n; i++) {
+    const c=cs[i], p=cs[i-1];
+    rH.forEach(h=>{
+      if (c.close>h.price&&p.close<=h.price)
+        events.push({type:trendUp?'BOS':'ChoCh',dir:'bull',time:c.time,price:h.price,idx:i});
+    });
+    rL.forEach(l=>{
+      if (c.close<l.price&&p.close>=l.price)
+        events.push({type:trendUp?'ChoCh':'BOS',dir:'bear',time:c.time,price:l.price,idx:i});
+    });
+  }
+  return events.slice(-4);
+}
+
+function _smcSweeps(cs, swings) {
+  const sweeps=[]; const n=cs.length;
+  const rH=swings.highs.filter(h=>h.i>n-55&&h.i<n-3).slice(-5);
+  const rL=swings.lows.filter(l=>l.i>n-55&&l.i<n-3).slice(-5);
+  for (let i=Math.max(1,n-22); i<n; i++) {
+    const c=cs[i], p=cs[i-1];
+    rH.forEach(h=>{
+      if (c.high>h.price&&c.close<h.price&&p.close<h.price)
+        sweeps.push({type:'bear_sweep',time:c.time,price:h.price,idx:i});
+    });
+    rL.forEach(l=>{
+      if (c.low<l.price&&c.close>l.price&&p.close>l.price)
+        sweeps.push({type:'bull_sweep',time:c.time,price:l.price,idx:i});
+    });
+  }
+  return sweeps.slice(-3);
+}
+
+function _smcEngulfing(cs) {
+  const out=[]; const n=cs.length;
+  for (let i=Math.max(1,n-18); i<n; i++) {
+    const p=cs[i-1], c=cs[i];
+    if (p.close<p.open&&c.close>c.open&&c.open<=p.close&&c.close>=p.open)
+      out.push({type:'bull_engulf',time:c.time,idx:i});
+    else if (p.close>p.open&&c.close<c.open&&c.open>=p.close&&c.close<=p.open)
+      out.push({type:'bear_engulf',time:c.time,idx:i});
+  }
+  return out;
+}
+
+function _smcATR(cs, period=14) {
+  if (cs.length<period+1) return cs[cs.length-1].close*0.01;
+  let sum=0;
+  for (let i=cs.length-period; i<cs.length; i++) {
+    const p=cs[i-1];
+    sum+=Math.max(cs[i].high-cs[i].low,Math.abs(cs[i].high-p.close),Math.abs(cs[i].low-p.close));
+  }
+  return sum/period;
+}
+
+function _smcBuildSetup(cs, obs, fvgs, bos, sweeps, engulfs, swings) {
+  if (!cs.length) return null;
+  const n=cs.length, close=cs[n-1].close;
+  let bS=0, beS=0, bR=[], beR=[];
+  sweeps.forEach(s=>{
+    if (s.type==='bull_sweep'&&s.idx>=n-10){bS+=25;bR.push('SSL Sweep');}
+    if (s.type==='bear_sweep'&&s.idx>=n-10){beS+=25;beR.push('BSL Sweep');}
+  });
+  bos.forEach(b=>{
+    if (b.dir==='bull'&&b.idx>=n-12){bS+=b.type==='ChoCh'?20:10;bR.push(b.type+'↑');}
+    if (b.dir==='bear'&&b.idx>=n-12){beS+=b.type==='ChoCh'?20:10;beR.push(b.type+'↓');}
+  });
+  obs.forEach(o=>{
+    const proximity=Math.abs(close-(o.lo+o.hi)/2)/close;
+    if (proximity<0.025) {
+      if (o.type==='bull'){bS+=15;bR.push('Bull OB');}
+      if (o.type==='bear'){beS+=15;beR.push('Bear OB');}
+    }
+  });
+  fvgs.forEach(f=>{
+    const proximity=Math.abs(close-(f.lo+f.hi)/2)/close;
+    if (proximity<0.03) {
+      if (f.type==='bull'&&close>f.lo){bS+=10;bR.push('Bull FVG');}
+      if (f.type==='bear'&&close<f.hi){beS+=10;beR.push('Bear FVG');}
+    }
+  });
+  engulfs.forEach(e=>{
+    if (e.type==='bull_engulf'){bS+=10;bR.push('Bull Engulf');}
+    if (e.type==='bear_engulf'){beS+=10;beR.push('Bear Engulf');}
+  });
+  const rH=swings.highs.slice(-3).map(h=>h.price);
+  const rL=swings.lows.slice(-3).map(l=>l.price);
+  if (rH.length>=2&&rH[rH.length-1]>rH[0]){bS+=5;bR.push('HH/HL');}
+  if (rL.length>=2&&rL[rL.length-1]<rL[0]){beS+=5;beR.push('LH/LL');}
+  bS=Math.min(95,bS); beS=Math.min(95,beS);
+  const isLong=bS>=beS&&bS>=75, isShort=beS>bS&&beS>=75;
+  if (!isLong&&!isShort) return null;
+  const dir=isLong?'long':'short', score=isLong?bS:beS, reasons=(isLong?bR:beR).join(' · ');
+  const atr=_smcATR(cs,14);
+  const swLow=swings.lows.slice(-1)[0]?.price||close*0.985;
+  const swHigh=swings.highs.slice(-1)[0]?.price||close*1.015;
+  let entry,sl,tp1,tp2,tp3;
+  if (dir==='long') {
+    const bOB=obs.filter(o=>o.type==='bull'&&o.hi<close).slice(-1)[0];
+    const bFVG=fvgs.filter(f=>f.type==='bull'&&f.hi<close).slice(-1)[0];
+    entry=bFVG?(bFVG.lo+bFVG.hi)/2:bOB?(bOB.lo+bOB.hi)/2:close;
+    sl=Math.min(swLow,entry-atr*1.5);
+    const risk=entry-sl; tp1=entry+risk; tp2=entry+risk*2; tp3=entry+risk*3;
+  } else {
+    const bOB=obs.filter(o=>o.type==='bear'&&o.lo>close).slice(-1)[0];
+    const bFVG=fvgs.filter(f=>f.type==='bear'&&f.lo>close).slice(-1)[0];
+    entry=bFVG?(bFVG.lo+bFVG.hi)/2:bOB?(bOB.lo+bOB.hi)/2:close;
+    sl=Math.max(swHigh,entry+atr*1.5);
+    const risk=sl-entry; tp1=entry-risk; tp2=entry-risk*2; tp3=entry-risk*3;
+  }
+  const risk=Math.abs(entry-sl), reward=Math.abs(tp2-entry);
+  const rr=risk>0?(reward/risk).toFixed(1):'?';
+  return {dir,entry,sl,tp1,tp2,tp3,rr,score,reasons};
+}
+
+function _smcZone(t0, t1, lo, hi, color, label, dashed) {
+  const style=dashed?2:0;
+  [lo,hi].forEach(price=>{
+    const s=chart.addLineSeries({color,lineWidth:1,lineStyle:style,priceLineVisible:false,lastValueVisible:false});
+    s.setData([{time:t0,value:price},{time:t1,value:price}]);
+    _smcSeries.push(s);
+  });
+  const pl=candleSeries.createPriceLine({price:(lo+hi)/2,color,lineWidth:0,lineStyle:4,axisLabelVisible:true,title:label});
+  _smcPriceLines.push(pl);
+}
+
+function _smcLine(t0, t1, price, color, width, style, label) {
+  const s=chart.addLineSeries({color,lineWidth:width,lineStyle:style,priceLineVisible:false,lastValueVisible:false});
+  s.setData([{time:t0,value:price},{time:t1,value:price}]);
+  _smcSeries.push(s);
+  if (label) _smcPriceLines.push(candleSeries.createPriceLine({price,color,lineWidth:width,lineStyle:style,axisLabelVisible:true,title:label}));
+}
+
+function _renderSMCPanel(obs,fvgs,bos,sweeps,engulfs,setup) {
+  const el=document.getElementById('smcPanel'); if(!el) return;
+  const ov=document.getElementById('smcOverlay'); if(ov) ov.style.display='block';
+  let items=[];
+  obs.forEach(o=>items.push({label:o.type==='bull'?'▲ Bull OB':'▼ Bear OB',c:o.type==='bull'?'#35c46e':'#ed5067'}));
+  fvgs.forEach(f=>items.push({label:f.type==='bull'?'⬆ Bull FVG':'⬇ Bear FVG',c:f.type==='bull'?'#2dd4bf':'#d46432'}));
+  bos.forEach(b=>items.push({label:b.type+(b.dir==='bull'?' ↑':' ↓'),c:b.type==='ChoCh'?'#f59e0b':b.dir==='bull'?'#35c46e':'#ed5067'}));
+  sweeps.forEach(s=>items.push({label:s.type==='bull_sweep'?'💧 Sweep ↑':'💧 Sweep ↓',c:'#a78bfa'}));
+  engulfs.forEach(e=>items.push({label:e.type==='bull_engulf'?'Engulf ↑':'Engulf ↓',c:e.type==='bull_engulf'?'#35c46e':'#ed5067'}));
+  const det=items.length
+    ?items.map(i=>`<div style="display:flex;align-items:center;gap:4px;padding:1px 0;"><span style="width:4px;height:4px;border-radius:50%;background:${i.c};flex-shrink:0;display:inline-block;"></span><span style="color:${i.c};font-size:8px;">${i.label}</span></div>`).join('')
+    :'<div style="color:var(--muted);font-size:8px;">No patterns in lookback</div>';
+  if (!setup) {
+    el.innerHTML=`<div style="font-size:7px;letter-spacing:1.2px;color:var(--muted);margin-bottom:5px;">DETECTED</div>${det}<div style="margin-top:7px;font-size:7px;color:var(--muted);">Score &lt;75 — no setup</div>`;
+    return;
+  }
+  const dec=activePair.dec, isLong=setup.dir==='long';
+  const dc=isLong?'#35c46e':'#ed5067', dl=isLong?'▲ LONG':'▼ SHORT';
+  const sc=setup.score>=85?'#35c46e':'#d4af37';
+  el.innerHTML=`<div style="font-size:7px;letter-spacing:1.2px;color:var(--muted);margin-bottom:5px;">DETECTED</div>${det}
+<div style="margin-top:7px;border-top:1px solid var(--border);padding-top:7px;">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+<span style="font-size:12px;font-weight:700;color:${dc};">${dl}</span>
+<span style="font-size:8px;padding:1px 6px;border-radius:2px;border:1px solid ${sc};color:${sc};">${setup.score}%</span>
+</div>
+<div style="font-size:7px;color:var(--text2);margin-bottom:6px;line-height:1.6;">${setup.reasons}</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;font-size:8px;">
+<div style="background:var(--bg);border:1px solid var(--border);border-radius:2px;padding:3px 5px;"><div style="color:var(--muted);font-size:6px;">ENTRY</div><div style="color:#d4af37;font-weight:600;">${setup.entry.toFixed(dec)}</div></div>
+<div style="background:var(--bg);border:1px solid rgba(237,80,103,0.3);border-radius:2px;padding:3px 5px;"><div style="color:var(--muted);font-size:6px;">STOP</div><div style="color:#ed5067;font-weight:600;">${setup.sl.toFixed(dec)}</div></div>
+<div style="background:var(--bg);border:1px solid rgba(53,196,110,0.2);border-radius:2px;padding:3px 5px;"><div style="color:var(--muted);font-size:6px;">TP1 1R</div><div style="color:#35c46e;">${setup.tp1.toFixed(dec)}</div></div>
+<div style="background:var(--bg);border:1px solid rgba(53,196,110,0.35);border-radius:2px;padding:3px 5px;"><div style="color:var(--muted);font-size:6px;">TP2 2R</div><div style="color:#35c46e;font-weight:600;">${setup.tp2.toFixed(dec)}</div></div>
+<div style="background:var(--bg);border:1px solid rgba(53,196,110,0.5);border-radius:2px;padding:3px 5px;"><div style="color:var(--muted);font-size:6px;">TP3 3R</div><div style="color:#35c46e;font-weight:700;">${setup.tp3.toFixed(dec)}</div></div>
+<div style="background:var(--bg);border:1px solid var(--border);border-radius:2px;padding:3px 5px;"><div style="color:var(--muted);font-size:6px;">R:R</div><div style="color:var(--accent);font-weight:700;">${setup.rr}:1</div></div>
+</div></div>`;
+}
+
+function drawSMCOverlays() {
+  clearSMC();
+  if (!showSMC||!candles.length||!candleSeries||candles.length<20) return;
+  const cs=candles, n=cs.length, tf=activeTF;
+  const tfSec=TF_SECONDS[tf]||3600;
+  const endTime=cs[n-1].time+tfSec*18;
+
+  const swings=_smcSwings(cs);
+  const obs=_smcOBs(cs,swings);
+  const fvgs=_smcFVGs(cs);
+  const bos=_smcBOSChoCh(cs,swings);
+  const sweeps=_smcSweeps(cs,swings);
+  const engulfs=_smcEngulfing(cs);
+
+  // ── Order Blocks ──────────────────────────────────────────
+  obs.forEach(o=>{
+    const color=o.type==='bull'?'rgba(53,196,110,0.7)':'rgba(237,80,103,0.7)';
+    _smcZone(o.time,endTime,o.lo,o.hi,color,o.type==='bull'?'Bull OB':'Bear OB',false);
+  });
+
+  // ── Fair Value Gaps ───────────────────────────────────────
+  fvgs.forEach(f=>{
+    const color=f.type==='bull'?'rgba(45,212,191,0.65)':'rgba(212,100,45,0.65)';
+    _smcZone(f.time,endTime,f.lo,f.hi,color,f.type==='bull'?'FVG↑':'FVG↓',true);
+  });
+
+  // ── Swing S/R ─────────────────────────────────────────────
+  swings.highs.slice(-3).forEach(h=>{
+    const s=chart.addLineSeries({color:'rgba(237,80,103,0.28)',lineWidth:1,lineStyle:2,priceLineVisible:false,lastValueVisible:false});
+    s.setData([{time:h.time,value:h.price},{time:endTime,value:h.price}]);
+    _smcSeries.push(s);
+  });
+  swings.lows.slice(-3).forEach(l=>{
+    const s=chart.addLineSeries({color:'rgba(53,196,110,0.28)',lineWidth:1,lineStyle:2,priceLineVisible:false,lastValueVisible:false});
+    s.setData([{time:l.time,value:l.price},{time:endTime,value:l.price}]);
+    _smcSeries.push(s);
+  });
+
+  // ── BOS / ChoCh / Sweep markers ──────────────────────────
+  const marks=[];
+  bos.forEach(b=>{marks.push({time:b.time,position:b.dir==='bull'?'belowBar':'aboveBar',shape:'arrowUp',color:b.type==='ChoCh'?'#f59e0b':b.dir==='bull'?'#35c46e':'#ed5067',text:b.type+(b.dir==='bull'?' ↑':' ↓'),size:1});});
+  sweeps.forEach(s=>{marks.push({time:s.time,position:s.type==='bull_sweep'?'belowBar':'aboveBar',shape:s.type==='bull_sweep'?'arrowUp':'arrowDown',color:'#a78bfa',text:s.type==='bull_sweep'?'SWEEP↑':'SWEEP↓',size:1.5});});
+  engulfs.forEach(e=>{marks.push({time:e.time,position:e.type==='bull_engulf'?'belowBar':'aboveBar',shape:'circle',color:e.type==='bull_engulf'?'rgba(53,196,110,0.85)':'rgba(237,80,103,0.85)',text:e.type==='bull_engulf'?'E↑':'E↓',size:0.8});});
+  // Merge with existing signal markers
+  const sigMarks=Object.values(signals).filter(s=>s.pair_id===activePair.id)
+    .map(s=>({time:Math.floor(s.detected_at/1000),position:s.dir==='long'?'belowBar':'aboveBar',shape:s.dir==='long'?'arrowUp':'arrowDown',color:'#7c5cbf',text:s.dir==='long'?'L':'S',size:1.5}));
+  try{candleSeries.setMarkers([...sigMarks,...marks].sort((a,b)=>a.time-b.time));}catch(e){}
+
+  // ── Trade Setup ───────────────────────────────────────────
+  const setup=_smcBuildSetup(cs,obs,fvgs,bos,sweeps,engulfs,swings);
+  _renderSMCPanel(obs,fvgs,bos,sweeps,engulfs,setup);
+  if (setup&&setup.score>=75) {
+    const dec=activePair.dec, t0=cs[n-1].time, isLong=setup.dir==='long';
+    const col=isLong?'rgba(53,196,110,0.9)':'rgba(237,80,103,0.9)';
+    _smcLine(t0,endTime,setup.entry,'#d4af37',2,0,`ENTRY ${setup.entry.toFixed(dec)}`);
+    _smcLine(t0,endTime,setup.sl,'rgba(237,80,103,0.9)',1,1,`SL ${setup.sl.toFixed(dec)}`);
+    _smcLine(t0,endTime,setup.tp1,col,1,2,`TP1 ${setup.tp1.toFixed(dec)}`);
+    _smcLine(t0,endTime,setup.tp2,col,1,2,`TP2 ${setup.tp2.toFixed(dec)}`);
+    _smcLine(t0,endTime,setup.tp3,col,1,2,`TP3 ${setup.tp3.toFixed(dec)}`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1677,7 +1976,7 @@ document.querySelectorAll('.ind-btn').forEach(btn=>{
   btn.addEventListener('click',()=>{ const ind=btn.dataset.ind; indicators[ind]=!indicators[ind]; btn.classList.toggle('on',indicators[ind]); if(candles.length) updateIndicators(candles); document.getElementById('rsiPanel').classList.toggle('visible',indicators.rsi); document.getElementById('macdPanel').classList.toggle('visible',indicators.macd); setTimeout(()=>{if(chart)chart.applyOptions({width:document.getElementById('mainChart').clientWidth,height:document.getElementById('mainChart').clientHeight});},50); });
 });
 document.getElementById('chBtn').addEventListener('click',()=>{ showChannel=!showChannel; document.getElementById('chBtn').classList.toggle('on',showChannel); });
-document.getElementById('smcBtn').addEventListener('click',()=>{ showSMC=!showSMC; document.getElementById('smcBtn').classList.toggle('on',showSMC); if(!showSMC) clearSMC(); });
+document.getElementById('smcBtn').addEventListener('click',()=>{ showSMC=!showSMC; document.getElementById('smcBtn').classList.toggle('on',showSMC); if(showSMC) drawSMCOverlays(); else clearSMC(); });
 document.querySelectorAll('.tab-btn').forEach(btn=>{
   btn.addEventListener('click',()=>{ const tab=btn.dataset.tab; document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active')); btn.classList.add('active'); document.getElementById('tab-'+tab).classList.add('active'); if(tab==='journal')renderJournal(); if(tab==='gametheory'){renderNashPanel();renderPatternStats();} if(tab==='backtest'){
   fetch('/api/backtest/results').then(r=>r.json()).then(d=>{
