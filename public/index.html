@@ -563,6 +563,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         <div class="journal-toggle">
           <button class="jt-btn active" data-jview="all" onclick="setJournalView('all')">ALL-TIME</button>
           <button class="jt-btn" data-jview="today" onclick="setJournalView('today')">TODAY</button>
+          <button class="jt-btn" data-jview="yesterday" onclick="setJournalView('yesterday')">YESTERDAY</button>
         </div>
         <div class="stat-grid">
           <div class="stat-card"><div class="stat-lbl">SIGNALS FIRED</div><div class="stat-val" id="jFired">0</div></div>
@@ -1594,8 +1595,8 @@ function computeClosedPositions(){
           trail=rows.find(r=>r.outcome==='trail'), sl=rows.find(r=>r.outcome==='sl');
     const half2=tp2||trail, dir=rows[0].dir;
     if (tp1 && !half2) { open++; return; }                 // still trailing → open
-    if (tp1 && half2) closed.push({ r:(tp1.r_mult+half2.r_mult)/2, t:half2.closed_at||0, dir, type: tp2?'tp2':'trail' });
-    else if (sl)      closed.push({ r:sl.r_mult, t:sl.closed_at||0, dir, type:'sl' });
+    if (tp1 && half2) closed.push({ r:(tp1.r_mult+half2.r_mult)/2, t:half2.closed_at||0, opened:rows[0].opened_at||0, dir, type: tp2?'tp2':'trail' });
+    else if (sl)      closed.push({ r:sl.r_mult, t:sl.closed_at||0, opened:rows[0].opened_at||0, dir, type:'sl' });
   });
   return { closed, open, fills };
 }
@@ -1606,20 +1607,26 @@ function setJournalView(v){
   renderJournal();
 }
 
-const _isToday = t => { const d=new Date(t); return !isNaN(d) && d.toISOString().slice(0,10)===new Date().toISOString().slice(0,10); };
+const _dateUTCStr   = t => { const d=new Date(t); return isNaN(d)?'':d.toISOString().slice(0,10); };
+const _isToday      = t => _dateUTCStr(t) === new Date().toISOString().slice(0,10);
+const _isYesterday  = t => { const y=new Date(); y.setUTCDate(y.getUTCDate()-1); return _dateUTCStr(t)===y.toISOString().slice(0,10); };
 
 function renderJournal() {
   const s = signalSummary;
   const set = (id, v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
   const { closed: allClosed, open: nOpen, fills } = computeClosedPositions();
 
-  // Today view scopes fired/expired to today (server-supplied); All-time uses totals.
-  set('jFired',   journalView==='today' ? (s.fired_today   ?? 0) : (s.total_fired ?? 0));
-  set('jExpired', journalView==='today' ? (s.expired_today ?? 0) : (s.expired     ?? 0));
-  set('jActive',  (s.active ?? 0) + nOpen);  // "now" snapshot — same in both views
+  // Fired/expired counts scoped by signal fire date (server-supplied); active is live.
+  set('jFired',   journalView==='today'     ? (s.fired_today       ?? 0)
+                : journalView==='yesterday' ? (s.fired_yesterday   ?? 0) : (s.total_fired ?? 0));
+  set('jExpired', journalView==='today'     ? (s.expired_today     ?? 0)
+                : journalView==='yesterday' ? (s.expired_yesterday ?? 0) : (s.expired     ?? 0));
+  set('jActive',  (s.active ?? 0) + nOpen);
 
-  // Today filter applies to the closed-trade view
-  const view = journalView==='today' ? allClosed.filter(c=>_isToday(c.t)) : allClosed;
+  // Filter closed trades by the date the signal was FIRED (opened_at), not when it closed.
+  const view = journalView==='today'     ? allClosed.filter(c=>_isToday(c.opened))
+             : journalView==='yesterday' ? allClosed.filter(c=>_isYesterday(c.opened))
+             : allClosed;
 
   set('jTP1', view.filter(c=>c.type!=='sl').length);  // reached TP1 (cumulative)
   set('jTP2', view.filter(c=>c.type==='tp2').length);
@@ -1639,7 +1646,7 @@ function renderJournal() {
   if (!view.length) {
     ['jWinRate','jAvgRR','jDrawdown','jBest','jWorst','jCumR','jStreak'].forEach(id => set(id, '—'));
     document.getElementById('journalLog').innerHTML =
-      '<div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No closed trades '+(journalView==='today'?'today':'yet')+'</div>';
+      '<div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No closed trades '+(journalView==='all'?'yet':journalView==='today'?'from signals fired today':'from signals fired yesterday')+'</div>';
     updateMiniStrip();
     return;
   }
@@ -1684,7 +1691,9 @@ function renderJournal() {
   }
 
   // ── Trade log — newest 20 fills (respects Today filter) ─────────
-  const logFills = journalView==='today' ? fills.filter(j=>_isToday(j.closed_at)) : fills;
+  const logFills = journalView==='today'     ? fills.filter(j=>_isToday(j.opened_at))
+                 : journalView==='yesterday' ? fills.filter(j=>_isYesterday(j.opened_at))
+                 : fills;
   document.getElementById('journalLog').innerHTML = logFills.slice(0,20).map(j => {
     const won = j.r_mult > 0;
     const iconName = j.outcome==='tp2'?'my_location':j.outcome==='tp1'?'check_circle':j.outcome==='trail'?'trending_up':'cancel';
