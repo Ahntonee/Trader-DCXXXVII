@@ -188,8 +188,10 @@ const getSignalSummary = db.prepare(`
 // can't derive on its own (expired signals never reach the journal).
 const getTodaySummary = db.prepare(`
   SELECT
-    SUM(CASE WHEN detected_at >= @todayStart THEN 1 ELSE 0 END)                          AS fired_today,
-    SUM(CASE WHEN status='expired' AND detected_at >= @todayStart THEN 1 ELSE 0 END)     AS expired_today
+    SUM(CASE WHEN detected_at >= @todayStart THEN 1 ELSE 0 END)                                                           AS fired_today,
+    SUM(CASE WHEN status='expired' AND detected_at >= @todayStart THEN 1 ELSE 0 END)                                     AS expired_today,
+    SUM(CASE WHEN detected_at >= @yestStart AND detected_at < @todayStart THEN 1 ELSE 0 END)                             AS fired_yesterday,
+    SUM(CASE WHEN status='expired' AND detected_at >= @yestStart AND detected_at < @todayStart THEN 1 ELSE 0 END)        AS expired_yesterday
   FROM signals
 `);
 

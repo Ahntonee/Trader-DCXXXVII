@@ -44,8 +44,10 @@ function summaryPayload() {
   const s = db.getSignalSummary.get();
   const now = new Date();
   const todayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const t = db.getTodaySummary.get({ todayStart });
-  return { ...s, fired_today: t.fired_today || 0, expired_today: t.expired_today || 0 };
+  const yestStart  = todayStart - 86_400_000;
+  const t = db.getTodaySummary.get({ todayStart, yestStart });
+  return { ...s, fired_today: t.fired_today || 0, expired_today: t.expired_today || 0,
+                 fired_yesterday: t.fired_yesterday || 0, expired_yesterday: t.expired_yesterday || 0 };
 }
 
 function broadcastSessions() {
