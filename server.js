@@ -69,6 +69,7 @@ wss.on('connection', ws => {
     ws.send(JSON.stringify({ type: 'stats_init', data: stats }));
     const btResults = db.getBacktestResults.all();
     if (btResults.length) ws.send(JSON.stringify({ type: 'backtest_results', data: btResults }));
+    if (_backtestRunning)  ws.send(JSON.stringify({ type: 'backtest_running' }));
     ws.send(JSON.stringify({ type: 'summary_init', data: summaryPayload() }));
     ws.send(JSON.stringify({
       type: 'sessions', active: engine.getMarketSessions(),

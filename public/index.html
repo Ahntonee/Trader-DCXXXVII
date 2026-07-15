@@ -692,6 +692,10 @@ function handleServerMessage(msg) {
     case 'backtest_progress':
       updateBacktestProgress(msg.done, msg.total, msg.label);
       break;
+    case 'backtest_running':
+      document.getElementById('btRunBtn').disabled=true;
+      document.getElementById('btRunBtn').innerHTML='<span class="material-symbols-rounded" style="font-size:13px;animation:spin 1.2s linear infinite">refresh</span> RUNNING…';
+      break;
     case 'backtest_results':
       renderBacktestResults(msg.data||[]);
       break;
