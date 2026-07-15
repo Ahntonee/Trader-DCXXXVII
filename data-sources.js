@@ -17,7 +17,7 @@ const KUCOIN_TF = { '15m':'15min', '1h':'1hour', '4h':'4hour', '1d':'1day' };
 const CG_IDS = {
   BTC:'bitcoin',  ETH:'ethereum',    SOL:'solana',               BNB:'binancecoin',
   XRP:'ripple',   ADA:'cardano',     DOGE:'dogecoin',            AVAX:'avalanche-2',
-  TRX:'tron',     TON:'the-open-network',                       SUI:'sui',
+  TRX:'tron',     TON:'the-open-network', HYPE:'hyperliquid',   SUI:'sui',
   LINK:'chainlink', DOT:'polkadot',  LTC:'litecoin',             ONDO:'ondo-finance',
   PEPE:'pepe',    WIF:'dogwifcoin',  SHIB:'shiba-inu',           NEAR:'near',
   INJ:'injective-protocol', OP:'optimism', ARB:'arbitrum',       JUP:'jupiter-exchange-solana',

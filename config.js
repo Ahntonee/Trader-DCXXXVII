@@ -31,6 +31,7 @@ const CRYPTO_PAIRS = [
   { id: 'AVAXUSDT', sym: 'AVAX',   dec: 3, minMove: 0.001      },
   { id: 'TRXUSDT',  sym: 'TRX',    dec: 5, minMove: 0.00001    },
   { id: 'TONUSDT',  sym: 'TON',    dec: 4, minMove: 0.0001     },
+  { id: 'HYPEUSDT', sym: 'HYPE',   dec: 3, minMove: 0.001      },
   { id: 'SUIUSDT',  sym: 'SUI',    dec: 4, minMove: 0.0001     },
   { id: 'LINKUSDT', sym: 'LINK',   dec: 3, minMove: 0.001      },
   { id: 'DOTUSDT',  sym: 'DOT',    dec: 3, minMove: 0.001      },
