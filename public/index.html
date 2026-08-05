@@ -672,6 +672,7 @@ let signals  = {};   // id → signal object (received from server)
 let journal  = [];
 let signalSummary = {};
 let portfolioData = { portfolio: null, open: [], trades: [] };
+let btMeta = null;
 let patternStats = [];
 let journalView = 'all';   // 'all' | 'today' — journal stats scope
 let showChannel = false, showSMC = true;
@@ -763,11 +764,15 @@ function handleServerMessage(msg) {
       document.getElementById('btProgress').style.display='none';
       showAlert('Backtest complete — results updated','entry');
       break;
+    case 'backtest_meta':
+      btMeta = msg.data || null;
+      if (document.getElementById('btResultsSection').style.display === 'none') btStatusFromMeta();
+      break;
     case 'backtest_error':
       document.getElementById('btRunBtn').disabled=false;
       document.getElementById('btRunBtn').innerHTML='<span class="material-symbols-rounded" style="font-size:13px">play_arrow</span> RUN BACKTEST';
       document.getElementById('btProgress').style.display='none';
-      setBtStatus(false, 'Backtest failed: ' + (msg.message||'unknown error') + ' — check server logs');
+      btStatusFromMeta();
       break;
     case 'portfolio_update':
       portfolioData = msg.data || portfolioData;
@@ -2002,9 +2007,24 @@ function setBtStatus(ok, msg) {
   el.innerHTML = `<span class="material-symbols-rounded" style="font-size:12px;vertical-align:middle;margin-right:4px">${icon}</span>${msg}`;
 }
 
+function btStatusFromMeta() {
+  if (!btMeta || !btMeta.status || btMeta.status === 'running') {
+    setBtStatus(false, 'No backtest data yet — click RUN BACKTEST to generate results');
+    return;
+  }
+  const ts = btMeta.last_run_at ? new Date(btMeta.last_run_at).toLocaleString() : '';
+  if (btMeta.status === 'failed') {
+    setBtStatus(false, `Backtest FAILED${ts ? ' · ' + ts : ''} — ${btMeta.message || 'unknown error'}`);
+  } else if (btMeta.status === 'success' && !btMeta.row_count) {
+    setBtStatus(false, `Backtest ran ${ts} — 0 patterns met the minimum trade threshold. Try running again after more signals close.`);
+  } else {
+    setBtStatus(false, 'No backtest data yet — click RUN BACKTEST to generate results');
+  }
+}
+
 function renderBacktestResults(results) {
   if (!results.length) {
-    setBtStatus(false, 'No backtest data — click RUN BACKTEST to generate results');
+    btStatusFromMeta();
     return;
   }
   document.getElementById('btResultsSection').style.display = 'block';
@@ -2165,10 +2185,10 @@ document.getElementById('chBtn').addEventListener('click',()=>{ showChannel=!sho
 document.getElementById('smcBtn').addEventListener('click',()=>{ showSMC=!showSMC; document.getElementById('smcBtn').classList.toggle('on',showSMC); if(showSMC) drawSMCOverlays(); else clearSMC(); });
 document.querySelectorAll('.tab-btn').forEach(btn=>{
   btn.addEventListener('click',()=>{ const tab=btn.dataset.tab; document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active')); btn.classList.add('active'); document.getElementById('tab-'+tab).classList.add('active'); if(tab==='journal')renderJournal(); if(tab==='gametheory'){renderNashPanel();renderPatternStats();} if(tab==='backtest'){
-  fetch('/api/backtest/results').then(r=>r.json()).then(d=>{
-    if(d.length) renderBacktestResults(d);
-    else setBtStatus(false,'No backtest data yet — click RUN BACKTEST to generate results');
-  }).catch(()=>{});
+  Promise.all([
+    fetch('/api/backtest/results').then(r=>r.json()),
+    fetch('/api/backtest/meta').then(r=>r.json()),
+  ]).then(([d,m])=>{ btMeta=m; if(d.length) renderBacktestResults(d); else btStatusFromMeta(); }).catch(()=>{});
   fetch('/api/stats').then(r=>r.json()).then(d=>{ patternStats=d; renderLivePerformance(d); }).catch(()=>{});
 } });
 });
@@ -2210,15 +2230,17 @@ async function init() {
 
   // Load existing data from server
   try {
-    const [journalData, statsData, btData] = await Promise.all([
+    const [journalData, statsData, btData, btMetaData] = await Promise.all([
       fetch('/api/journal').then(r=>r.json()),
       fetch('/api/stats').then(r=>r.json()),
       fetch('/api/backtest/results').then(r=>r.json()),
+      fetch('/api/backtest/meta').then(r=>r.json()),
     ]);
     journal=journalData; renderJournal();
     patternStats=statsData; renderPatternStats(); renderLivePerformance(statsData);
+    btMeta = btMetaData;
     if (btData.length) renderBacktestResults(btData);
-    else setBtStatus(false,'No backtest data yet — click RUN BACKTEST to generate results');
+    else btStatusFromMeta();
   } catch(e) { /* server may not have data yet */ }
 
   setInterval(renderSignals, 10000); // refresh proximity bars every 10s

@@ -203,6 +203,17 @@ const getPatternWinRate = db.prepare(`
 `);
 
 // ── Backtest results ──────────────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS backtest_meta (
+    id          INTEGER PRIMARY KEY CHECK(id=1),
+    last_run_at INTEGER,
+    status      TEXT,
+    message     TEXT,
+    row_count   INTEGER DEFAULT 0
+  );
+  INSERT OR IGNORE INTO backtest_meta (id) VALUES (1);
+`);
+
 const insertBacktestResult = db.prepare(`
   INSERT INTO backtest_results (run_at,symbol,tf,pattern,total_signals,wins,losses,win_rate,avg_r,max_dd,sharpe,sample_from,sample_to)
   VALUES (@run_at,@symbol,@tf,@pattern,@total_signals,@wins,@losses,@win_rate,@avg_r,@max_dd,@sharpe,@sample_from,@sample_to)
@@ -210,6 +221,11 @@ const insertBacktestResult = db.prepare(`
 
 const getBacktestResults = db.prepare(`
   SELECT * FROM backtest_results WHERE run_at=(SELECT MAX(run_at) FROM backtest_results) ORDER BY win_rate DESC
+`);
+
+const getBacktestMeta    = db.prepare(`SELECT * FROM backtest_meta WHERE id=1`);
+const upsertBacktestMeta = db.prepare(`
+  UPDATE backtest_meta SET last_run_at=@last_run_at, status=@status, message=@message, row_count=@row_count WHERE id=1
 `);
 
 const getSignalSummary = db.prepare(`
@@ -289,6 +305,7 @@ module.exports = {
   getPatternWinRate,
   insertBacktestResult,
   getBacktestResults,
+  getBacktestMeta, upsertBacktestMeta,
   getSignalSummary,
   getTodaySummary,
   getPortfolio, updatePortfolio, resetPortfolio,

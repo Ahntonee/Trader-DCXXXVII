@@ -75,6 +75,7 @@ wss.on('connection', ws => {
     const btResults = db.getBacktestResults.all();
     if (btResults.length) ws.send(JSON.stringify({ type: 'backtest_results', data: btResults }));
     if (_backtestRunning)  ws.send(JSON.stringify({ type: 'backtest_running' }));
+    ws.send(JSON.stringify({ type: 'backtest_meta', data: db.getBacktestMeta.get() }));
     ws.send(JSON.stringify({ type: 'portfolio_update', data: portfolio.portfolioPayload() }));
     ws.send(JSON.stringify({ type: 'summary_init', data: summaryPayload() }));
     ws.send(JSON.stringify({
@@ -559,6 +560,10 @@ app.get('/api/backtest/results', (req, res) => {
   res.json(db.getBacktestResults.all());
 });
 
+app.get('/api/backtest/meta', (req, res) => {
+  res.json(db.getBacktestMeta.get() || null);
+});
+
 app.get('/api/instruments', (req, res) => {
   res.json({ crypto: CRYPTO_PAIRS, forex: FOREX_PAIRS });
 });
@@ -635,6 +640,8 @@ app.post('/api/backtest/run', async (req, res) => {
   }
   _backtestRunning = true;
   _backtestLastRun = Date.now();
+  db.upsertBacktestMeta.run({ last_run_at: _backtestLastRun, status: 'running', message: null, row_count: 0 });
+  broadcast({ type: 'backtest_meta', data: db.getBacktestMeta.get() });
   res.json({ started: true, message: 'Backtest started. Results will appear in the Backtest tab when complete.' });
   const pairs = req.body.pairs || CRYPTO_PAIRS;
   const tfs   = req.body.timeframes || ['1h', '4h'];
@@ -643,10 +650,14 @@ app.post('/api/backtest/run', async (req, res) => {
       broadcast({ type: 'backtest_progress', done: n, total: t, label });
     });
     const results = db.getBacktestResults.all();
+    db.upsertBacktestMeta.run({ last_run_at: _backtestLastRun, status: 'success', message: null, row_count: results.length });
     broadcast({ type: 'backtest_results', data: results });
+    broadcast({ type: 'backtest_meta', data: db.getBacktestMeta.get() });
     broadcast({ type: 'backtest_done' });
   } catch (e) {
     console.error('[Backtest]', e);
+    db.upsertBacktestMeta.run({ last_run_at: Date.now(), status: 'failed', message: e.message, row_count: 0 });
+    broadcast({ type: 'backtest_meta', data: db.getBacktestMeta.get() });
     broadcast({ type: 'backtest_error', message: e.message });
   } finally {
     _backtestRunning = false;
