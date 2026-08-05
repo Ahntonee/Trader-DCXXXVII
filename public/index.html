@@ -477,6 +477,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <button class="tab-btn" data-tab="gametheory">GT ZONES</button>
       <button class="tab-btn" data-tab="backtest">BACKTEST</button>
       <button class="tab-btn" data-tab="journal">JOURNAL</button>
+      <button class="tab-btn" data-tab="portfolio">PORTFOLIO</button>
     </div>
 
     <div class="tab-content active" id="tab-signals">
@@ -596,6 +597,62 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         <div class="journal-log" id="journalLog"><div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No trades logged yet</div></div>
       </div>
     </div>
+
+    <!-- ═══ PORTFOLIO TAB ═══════════════════════════════════════════════ -->
+    <div class="tab-content" id="tab-portfolio">
+      <div class="journal-wrap">
+
+        <!-- Balance header -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px;">
+          <div class="stat-card" style="grid-column:1/-1;background:var(--accent);color:var(--bg);">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <div style="font-size:8px;font-weight:700;letter-spacing:1.5px;opacity:.7;">PORTFOLIO BALANCE</div>
+                <div id="pfBalance" style="font-size:22px;font-weight:700;font-family:'JetBrains Mono',monospace;">$100.00</div>
+              </div>
+              <div style="text-align:right;">
+                <div style="font-size:8px;letter-spacing:1px;opacity:.7;">TOTAL RETURN</div>
+                <div id="pfReturn" style="font-size:16px;font-weight:700;">+0.00%</div>
+                <div style="font-size:8px;opacity:.6;margin-top:2px;">started at <span id="pfStarting">$100.00</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="stat-card"><div class="stat-lbl">WIN RATE</div><div class="stat-val" id="pfWR">—</div></div>
+          <div class="stat-card"><div class="stat-lbl">TOTAL TRADES</div><div class="stat-val" id="pfTrades">0</div></div>
+          <div class="stat-card"><div class="stat-lbl">PEAK BALANCE</div><div class="stat-val acc" id="pfPeak">$100.00</div></div>
+          <div class="stat-card"><div class="stat-lbl">MAX DRAWDOWN</div><div class="stat-val" id="pfDD">0.0%</div></div>
+          <div class="stat-card"><div class="stat-lbl">OPEN TRADES</div><div class="stat-val acc" id="pfOpen">0</div></div>
+          <div class="stat-card"><div class="stat-lbl">RISK / TRADE</div><div class="stat-val" id="pfRisk">1.0%</div></div>
+        </div>
+
+        <!-- Equity curve -->
+        <div style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:6px;">
+          <div style="font-size:8px;letter-spacing:1.5px;color:var(--muted);margin-bottom:4px;">EQUITY CURVE ($)</div>
+          <canvas id="pfEquityChart" style="width:100%;height:60px;display:block;"></canvas>
+        </div>
+
+        <!-- Open trades -->
+        <div style="font-size:8px;letter-spacing:1.5px;color:var(--muted);margin-bottom:4px;">OPEN POSITIONS</div>
+        <div id="pfOpenTrades" style="margin-bottom:8px;">
+          <div style="text-align:center;padding:12px;color:var(--muted);font-size:9px;">No open positions</div>
+        </div>
+
+        <!-- Closed trades log -->
+        <div style="font-size:8px;letter-spacing:1.5px;color:var(--muted);margin-bottom:4px;">TRADE HISTORY</div>
+        <div class="journal-log" id="pfTradeLog">
+          <div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No closed trades yet</div>
+        </div>
+
+        <!-- Reset button -->
+        <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">
+          <button onclick="resetPortfolio()" style="width:100%;padding:6px;background:transparent;border:1px solid var(--border);border-radius:3px;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1px;cursor:pointer;">
+            RESET PORTFOLIO TO $100
+          </button>
+        </div>
+
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -614,6 +671,7 @@ let candles = [];
 let signals  = {};   // id → signal object (received from server)
 let journal  = [];
 let signalSummary = {};
+let portfolioData = { portfolio: null, open: [], trades: [] };
 let patternStats = [];
 let journalView = 'all';   // 'all' | 'today' — journal stats scope
 let showChannel = false, showSMC = true;
@@ -710,6 +768,10 @@ function handleServerMessage(msg) {
       document.getElementById('btRunBtn').innerHTML='<span class="material-symbols-rounded" style="font-size:13px">play_arrow</span> RUN BACKTEST';
       document.getElementById('btProgress').style.display='none';
       setBtStatus(false, 'Backtest failed: ' + (msg.message||'unknown error') + ' — check server logs');
+      break;
+    case 'portfolio_update':
+      portfolioData = msg.data || portfolioData;
+      renderPortfolio();
       break;
   }
 }
@@ -1712,6 +1774,117 @@ function renderJournal() {
   }).join('');
 
   updateMiniStrip();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PORTFOLIO TAB
+// ═══════════════════════════════════════════════════════════════
+function renderPortfolio() {
+  const { portfolio: p, open, trades } = portfolioData;
+  if (!p) return;
+
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  const col = (el, v) => { if (el) el.style.color = v >= 0 ? 'var(--green)' : 'var(--red)'; };
+
+  const ret      = ((p.balance - p.starting) / p.starting * 100);
+  const dd       = p.peak > 0 ? ((p.peak - p.balance) / p.peak * 100) : 0;
+  const wr       = p.total_trades > 0 ? Math.round(p.wins / p.total_trades * 100) : null;
+  const sign     = ret >= 0 ? '+' : '';
+
+  const balEl = document.getElementById('pfBalance');
+  if (balEl) { balEl.textContent = '$' + p.balance.toFixed(2); col(balEl, p.balance - p.starting); }
+
+  const retEl = document.getElementById('pfReturn');
+  if (retEl) { retEl.textContent = sign + ret.toFixed(2) + '%'; col(retEl, ret); }
+
+  set('pfStarting', '$' + p.starting.toFixed(2));
+  set('pfPeak',     '$' + p.peak.toFixed(2));
+  set('pfWR',       wr !== null ? wr + '%' : '—');
+  set('pfTrades',   p.total_trades);
+  set('pfOpen',     open.length);
+  set('pfRisk',     p.risk_pct.toFixed(1) + '%');
+
+  const ddEl = document.getElementById('pfDD');
+  if (ddEl) { ddEl.textContent = dd.toFixed(1) + '%'; ddEl.style.color = dd > 10 ? 'var(--red)' : dd > 5 ? 'var(--yellow, #f59e0b)' : 'var(--green)'; }
+
+  // Equity curve
+  const closed = trades.filter(t => t.status === 'closed');
+  const chrono = closed.slice().sort((a, b) => a.opened_at - b.opened_at);
+  const ep = [p.starting];
+  let running = p.starting;
+  chrono.forEach(t => { running = +(running + (t.pnl_total || 0)).toFixed(4); ep.push(running); });
+  const canvas = document.getElementById('pfEquityChart');
+  if (canvas && ep.length > 1) {
+    const ctx = canvas.getContext('2d');
+    canvas.width = canvas.offsetWidth || 260; canvas.height = 60;
+    const W = canvas.width, H = canvas.height;
+    const minV = Math.min(...ep), maxV = Math.max(...ep), range = maxV - minV || 1;
+    const toX = i => (i / (ep.length - 1)) * W;
+    const toY = v => H - ((v - minV) / range) * H * 0.8 - H * 0.1;
+    ctx.clearRect(0, 0, W, H);
+    ctx.beginPath();
+    ctx.strokeStyle = ep[ep.length-1] >= p.starting ? '#35c46e' : '#ed5067';
+    ctx.lineWidth = 1.5;
+    ep.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+    ctx.stroke();
+  }
+
+  // Open positions
+  const openEl = document.getElementById('pfOpenTrades');
+  if (openEl) {
+    if (!open.length) {
+      openEl.innerHTML = '<div style="text-align:center;padding:12px;color:var(--muted);font-size:9px;">No open positions</div>';
+    } else {
+      openEl.innerHTML = open.map(t => {
+        const tp1pct = t.pnl_tp1 > 0 ? `<span style="color:var(--green);font-size:8px;"> TP1 +$${t.pnl_tp1.toFixed(2)}</span>` : '';
+        const badge  = t.status === 'tp1' ? '<span style="background:#35c46e22;color:var(--green);padding:1px 4px;border-radius:2px;font-size:7px;">TP1 ✓</span>' : '<span style="background:var(--accent)22;color:var(--accent);padding:1px 4px;border-radius:2px;font-size:7px;">LIVE</span>';
+        return `<div class="jlog-e" style="flex-direction:column;align-items:flex-start;gap:2px;">
+          <div style="display:flex;width:100%;justify-content:space-between;align-items:center;">
+            <span class="jlog-sym">${t.sym}</span>
+            <span class="jlog-type ${t.dir}">${t.dir.toUpperCase()}</span>
+            <span style="font-size:8px;color:var(--muted2);flex:1;margin:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.pattern||''} ${t.tf}</span>
+            ${badge}${tp1pct}
+            <span style="font-size:9px;color:var(--muted);margin-left:4px;">risk <b style="color:var(--text)">$${t.risk_amount.toFixed(2)}</b></span>
+          </div>
+          <div style="font-size:8px;color:var(--muted2);padding-left:2px;">E:${t.entry.toFixed(2)} · SL:${t.sl.toFixed(2)} · TP1:${t.tp1.toFixed(2)}${t.tp2?` · TP2:${t.tp2.toFixed(2)}`:''}</div>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  // Closed trade log
+  const logEl = document.getElementById('pfTradeLog');
+  if (logEl) {
+    const recent = closed.slice().sort((a, b) => b.closed_at - a.closed_at).slice(0, 30);
+    if (!recent.length) {
+      logEl.innerHTML = '<div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No closed trades yet</div>';
+    } else {
+      logEl.innerHTML = recent.map(t => {
+        const won  = (t.pnl_total || 0) > 0;
+        const be   = (t.pnl_total || 0) === 0;
+        const pnl  = (t.pnl_total || 0);
+        const sign = pnl >= 0 ? '+' : '';
+        const color = won ? 'var(--green)' : be ? 'var(--muted)' : 'var(--red)';
+        const icon  = t.outcome === 'tp2' ? 'my_location' : t.outcome === 'tp1' ? 'check_circle' : t.outcome === 'be' ? 'lock' : 'cancel';
+        return `<div class="jlog-e ${won?'win':be?'':'loss'}">
+          <span class="jlog-sym">${t.sym}</span>
+          <span class="jlog-type ${t.dir}">${t.dir.toUpperCase()}</span>
+          <span style="font-size:8px;color:var(--muted2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.pattern||''} ${t.tf}</span>
+          <span class="material-symbols-rounded" style="font-size:14px;color:${color};margin-right:4px">${icon}</span>
+          <span class="jlog-pnl ${won?'pos':be?'':'neg'}" style="min-width:52px;text-align:right;">${sign}$${Math.abs(pnl).toFixed(2)}</span>
+        </div>`;
+      }).join('');
+    }
+  }
+}
+
+async function resetPortfolio() {
+  if (!confirm('Reset portfolio to $100? This will close all open paper trades.')) return;
+  try {
+    const res = await fetch('/api/portfolio/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ starting: 100, risk_pct: 1.0 }) });
+    const j = await res.json();
+    if (j.ok) { portfolioData = j.data; renderPortfolio(); showAlert('Portfolio reset to $100', 'entry'); }
+  } catch (e) { console.error('Reset failed', e); }
 }
 
 // ── #10 Always-visible mini stat strip ──────────────────────────

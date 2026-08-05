@@ -18,6 +18,7 @@ const db                = require('./db');
 const engine            = require('./signal-engine');
 const tg                = require('./telegram');
 const { runBacktest }   = require('./backtester');
+const portfolio         = require('./portfolio');
 
 // Candle cache for structure-based trailing stop — keyed by pairId+tf
 const _candleCache = {};
@@ -50,6 +51,10 @@ function summaryPayload() {
                  fired_yesterday: t.fired_yesterday || 0, expired_yesterday: t.expired_yesterday || 0 };
 }
 
+function broadcastPortfolio() {
+  broadcast({ type: 'portfolio_update', data: portfolio.portfolioPayload() });
+}
+
 function broadcastSessions() {
   broadcast({
     type:    'sessions',
@@ -70,6 +75,7 @@ wss.on('connection', ws => {
     const btResults = db.getBacktestResults.all();
     if (btResults.length) ws.send(JSON.stringify({ type: 'backtest_results', data: btResults }));
     if (_backtestRunning)  ws.send(JSON.stringify({ type: 'backtest_running' }));
+    ws.send(JSON.stringify({ type: 'portfolio_update', data: portfolio.portfolioPayload() }));
     ws.send(JSON.stringify({ type: 'summary_init', data: summaryPayload() }));
     ws.send(JSON.stringify({
       type: 'sessions', active: engine.getMarketSessions(),
@@ -169,6 +175,12 @@ function handleSignalUpdate(sig, updates) {
     });
     broadcast({ type: 'signal_update', id: sig.id, updates });
 
+    // ── ENTRY: open paper trade ───────────────────────────────────────
+    if (updates.status === 'entered') {
+      const pData = portfolio.openTrade(sig, updates.entry_price ?? sig.entry);
+      if (pData) broadcast({ type: 'portfolio_update', data: pData });
+    }
+
     // ── TP1 HIT: lock 50% at +1.0R, move SL to TP1 price ────────────
     // SL moves to TP1 (not entry) — if price returns to TP1 the remainder
     // closes at breakeven; the TP1 win is already in the journal.
@@ -199,6 +211,8 @@ function handleSignalUpdate(sig, updates) {
       broadcast({ type: 'summary_init', data: summaryPayload() });
       tg.sendMessage(tg.formatTPHit(sig, 'tp1'));
       console.log(`[TP1] ${sig.sym} — 50% locked +1.0R, SL moved to TP1 price (${sig.tp1})`);
+      const pd1 = portfolio.hitTP1(sig.id);
+      if (pd1) broadcast({ type: 'portfolio_update', data: pd1 });
     }
 
     // ── TP2 or BE CLOSE: handle remaining 50% ────────────────────────
@@ -257,6 +271,10 @@ function handleSignalUpdate(sig, updates) {
 
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
       broadcast({ type: 'summary_init', data: summaryPayload() });
+
+      // ── settle paper trade ──────────────────────────────────────────
+      const pdClose = portfolio.closeTrade(sig.id, rMult, outcome);
+      if (pdClose) broadcast({ type: 'portfolio_update', data: pdClose });
 
       if (wasTrailing && updates.status === 'sl_hit') {
         tg.sendMessage(`🔒 ${sig.sym} ${sig.tf} — remainder closed at breakeven (TP1 win protected)`);
@@ -573,6 +591,16 @@ function toCSV(rows) {
   for (const row of rows) lines.push(headers.map(h => escape(row[h])).join(','));
   return lines.join('\r\n');
 }
+
+// ── Portfolio endpoints ───────────────────────────────────────────────────
+app.get('/api/portfolio', (req, res) => res.json(portfolio.portfolioPayload()));
+
+app.post('/api/portfolio/reset', (req, res) => {
+  const { starting = 100, risk_pct = 1.0 } = req.body || {};
+  const data = portfolio.resetPortfolio(+starting, +risk_pct);
+  if (data) { broadcast({ type: 'portfolio_update', data }); res.json({ ok: true, data }); }
+  else res.status(500).json({ error: 'Reset failed' });
+});
 
 app.get('/api/export/journal', (req, res) => {
   const rows = db.getFullJournal.all();

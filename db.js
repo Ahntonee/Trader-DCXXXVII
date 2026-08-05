@@ -93,6 +93,46 @@ db.exec(`
     sample_from TEXT,
     sample_to TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS portfolio (
+    id          INTEGER PRIMARY KEY CHECK(id=1),
+    balance     REAL    NOT NULL DEFAULT 100,
+    starting    REAL    NOT NULL DEFAULT 100,
+    peak        REAL    NOT NULL DEFAULT 100,
+    risk_pct    REAL    NOT NULL DEFAULT 1.0,
+    total_trades INTEGER DEFAULT 0,
+    wins        INTEGER DEFAULT 0,
+    losses      INTEGER DEFAULT 0,
+    be_trades   INTEGER DEFAULT 0,
+    total_pnl   REAL    DEFAULT 0,
+    updated_at  INTEGER
+  );
+  INSERT OR IGNORE INTO portfolio (id,balance,starting,peak,risk_pct,total_trades,wins,losses,be_trades,total_pnl,updated_at)
+  VALUES (1,100,100,100,1.0,0,0,0,0,0,0);
+
+  CREATE TABLE IF NOT EXISTS paper_trades (
+    id           TEXT PRIMARY KEY,
+    signal_id    TEXT NOT NULL,
+    sym          TEXT NOT NULL,
+    tf           TEXT NOT NULL,
+    dir          TEXT NOT NULL,
+    pattern      TEXT,
+    entry        REAL NOT NULL,
+    sl           REAL NOT NULL,
+    tp1          REAL NOT NULL,
+    tp2          REAL,
+    risk_amount  REAL NOT NULL,
+    win_rate     REAL,
+    status       TEXT DEFAULT 'open',
+    pnl_tp1      REAL DEFAULT 0,
+    pnl_final    REAL DEFAULT 0,
+    pnl_total    REAL DEFAULT 0,
+    balance_before REAL,
+    balance_after  REAL,
+    opened_at    INTEGER,
+    closed_at    INTEGER,
+    outcome      TEXT
+  );
 `);
 
 // ── v3 schema migrations (safe — no-op if column already exists) ──────
@@ -195,6 +235,38 @@ const getTodaySummary = db.prepare(`
   FROM signals
 `);
 
+// ── Portfolio ─────────────────────────────────────────────────
+const getPortfolio = db.prepare(`SELECT * FROM portfolio WHERE id=1`);
+
+const updatePortfolio = db.prepare(`
+  UPDATE portfolio SET balance=@balance, peak=@peak, total_pnl=@total_pnl,
+  wins=@wins, losses=@losses, be_trades=@be_trades,
+  total_trades=@total_trades, updated_at=@updated_at WHERE id=1
+`);
+
+const resetPortfolio = db.prepare(`
+  UPDATE portfolio SET balance=@starting, starting=@starting, peak=@starting,
+  risk_pct=@risk_pct, total_trades=0, wins=0, losses=0, be_trades=0,
+  total_pnl=0, updated_at=@updated_at WHERE id=1
+`);
+
+const insertPaperTrade = db.prepare(`
+  INSERT OR IGNORE INTO paper_trades
+  (id,signal_id,sym,tf,dir,pattern,entry,sl,tp1,tp2,risk_amount,win_rate,status,pnl_tp1,pnl_final,pnl_total,balance_before,opened_at)
+  VALUES (@id,@signal_id,@sym,@tf,@dir,@pattern,@entry,@sl,@tp1,@tp2,@risk_amount,@win_rate,@status,0,0,0,@balance_before,@opened_at)
+`);
+
+const getPaperTrade          = db.prepare(`SELECT * FROM paper_trades WHERE signal_id=?`);
+const getOpenPaperTrades     = db.prepare(`SELECT * FROM paper_trades WHERE status IN ('open','tp1') ORDER BY opened_at DESC`);
+const getPaperTrades         = db.prepare(`SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT 500`);
+
+const updatePaperTradeTP1    = db.prepare(`UPDATE paper_trades SET status='tp1', pnl_tp1=@pnl_tp1 WHERE signal_id=@signal_id`);
+
+const updatePaperTradeClose  = db.prepare(`
+  UPDATE paper_trades SET status='closed', pnl_final=@pnl_final, pnl_total=@pnl_total,
+  balance_after=@balance_after, outcome=@outcome, closed_at=@closed_at WHERE signal_id=@signal_id
+`);
+
 // Wraps any function in a SQLite transaction — all writes succeed or none do.
 // Protects multi-step operations (TP1 hit: journal + SL update + stat) from
 // leaving the DB in a partial state if the process crashes mid-way.
@@ -219,6 +291,9 @@ module.exports = {
   getBacktestResults,
   getSignalSummary,
   getTodaySummary,
+  getPortfolio, updatePortfolio, resetPortfolio,
+  insertPaperTrade, getPaperTrade, getOpenPaperTrades, getPaperTrades,
+  updatePaperTradeTP1, updatePaperTradeClose,
   withTransaction,
   db,
 };
