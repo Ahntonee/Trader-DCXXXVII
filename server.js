@@ -84,10 +84,21 @@ wss.on('connection', ws => {
 
 async function processNewSignal(sig) {
   try {
+    const allActive = db.getActiveSignals.all();
+
+    // ── Exact duplicate guard ─────────────────────────────────────
+    // Same pair + same timeframe + same direction already active → skip.
+    const exactDupe = allActive.find(s =>
+      s.pair_id === sig.pair_id &&
+      s.tf      === sig.tf      &&
+      s.dir     === sig.dir     &&
+      ['pending', 'entered', 'tp1_hit'].includes(s.status)
+    );
+    if (exactDupe) return;
+
     // ── Correlation cap ───────────────────────────────────────────
     // Count active signals in the same direction (pending or entered).
     // MTF stacks on the SAME pair are exempt — they are one trade.
-    const allActive = db.getActiveSignals.all();
     const sameDir = allActive.filter(s =>
       s.dir === sig.dir &&
       s.pair_id !== sig.pair_id &&

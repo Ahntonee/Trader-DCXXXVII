@@ -140,7 +140,7 @@ const insertJournal = db.prepare(`
   VALUES (@signal_id,@sym,@tf,@dir,@pattern,@htf_bias,@entry,@exit_price,@sl,@tp1,@tp2,@outcome,@r_mult,@pnl_pct,@confidence,@opened_at,@closed_at,@date)
 `);
 
-const getJournal     = db.prepare(`SELECT * FROM journal ORDER BY closed_at DESC LIMIT 200`);
+const getJournal     = db.prepare(`SELECT * FROM journal ORDER BY closed_at DESC LIMIT 2000`);
 const getFullJournal = db.prepare(`SELECT * FROM journal ORDER BY closed_at DESC`);
 const getAllSignals   = db.prepare(`SELECT * FROM signals ORDER BY detected_at DESC`);
 const clearJournal   = db.prepare(`DELETE FROM journal`);
