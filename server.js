@@ -565,6 +565,10 @@ app.get('/api/backtest/meta', (req, res) => {
   res.json(db.getBacktestMeta.get() || null);
 });
 
+app.get('/api/trade-flow', (req, res) => {
+  res.json(db.getTradeFlow.all());
+});
+
 app.get('/api/instruments', (req, res) => {
   res.json({ crypto: CRYPTO_PAIRS, forex: FOREX_PAIRS });
 });

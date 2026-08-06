@@ -309,6 +309,33 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .jt-btn{flex:1;padding:5px;border:none;border-radius:3px;background:transparent;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:1px;cursor:pointer;transition:all 0.15s;}
 .jt-btn.active{background:var(--accent);color:var(--bg);}
 
+/* ── Trade Flow view ── */
+.trade-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-bottom:8px;overflow:hidden;}
+.tc-header{display:flex;justify-content:space-between;align-items:center;padding:7px 10px;border-bottom:1px solid var(--border);gap:6px;flex-wrap:wrap;}
+.tc-timeline{padding:8px 10px;}
+.tl-step{display:flex;align-items:flex-start;gap:7px;}
+.tl-dot{width:8px;height:8px;border-radius:50%;margin-top:2px;flex-shrink:0;}
+.tl-dot.fired{background:var(--muted2);}
+.tl-dot.entered{background:var(--gold);}
+.tl-dot.tp1{background:rgba(53,196,110,.7);}
+.tl-dot.tp2{background:var(--green);}
+.tl-dot.sl{background:var(--red);}
+.tl-dot.be{background:var(--muted);}
+.tl-dot.watching{background:var(--accent);box-shadow:0 0 0 2px rgba(99,179,237,.3);}
+.tl-dot.expired{background:var(--border);}
+.tl-line{width:1px;height:10px;background:var(--border);margin-left:3.5px;}
+.tl-content{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;font-family:'JetBrains Mono',monospace;font-size:9px;padding-bottom:2px;}
+.tl-label{font-weight:700;letter-spacing:.5px;}
+.tl-time{color:var(--muted);font-size:8px;}
+.tl-price{color:var(--text);background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:8px;}
+.tl-note{font-size:8px;color:var(--muted);}
+.tc-footer{padding:5px 10px;border-top:1px solid var(--border);font-size:8px;font-family:'JetBrains Mono',monospace;letter-spacing:.5px;color:var(--muted);}
+.flow-table{width:100%;border-collapse:collapse;font-size:9px;font-family:'JetBrains Mono',monospace;margin-bottom:14px;}
+.flow-table th{text-align:left;color:var(--muted);font-size:7px;letter-spacing:1px;border-bottom:1px solid var(--border);padding:4px 6px;font-weight:600;}
+.flow-table td{padding:5px 6px;border-bottom:1px solid rgba(127,127,127,.07);vertical-align:middle;}
+.flow-table tbody tr:hover td{background:var(--surface2);}
+.flow-sec-lbl{font-size:7px;font-weight:700;letter-spacing:1.5px;color:var(--muted);margin-bottom:6px;}
+
 /* ── Always-visible mini stat strip ── */
 .mini-strip{display:flex;align-items:center;gap:14px;padding:4px 12px;background:var(--bg);border-bottom:1px solid var(--border);font-size:9px;letter-spacing:0.5px;flex-shrink:0;overflow-x:auto;white-space:nowrap;}
 .mini-strip .ms-item{display:flex;align-items:center;gap:5px;color:var(--muted);}
@@ -565,7 +592,9 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
           <button class="jt-btn active" data-jview="all" onclick="setJournalView('all')">ALL-TIME</button>
           <button class="jt-btn" data-jview="today" onclick="setJournalView('today')">TODAY</button>
           <button class="jt-btn" data-jview="yesterday" onclick="setJournalView('yesterday')">YESTERDAY</button>
+          <button class="jt-btn" data-jview="flow" onclick="setJournalView('flow')">FLOW</button>
         </div>
+        <div id="journalNormalSec">
         <div class="stat-grid">
           <div class="stat-card"><div class="stat-lbl">SIGNALS FIRED</div><div class="stat-val" id="jFired">0</div></div>
           <div class="stat-card"><div class="stat-lbl">ACTIVE NOW</div><div class="stat-val acc" id="jActive">0</div></div>
@@ -595,6 +624,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
           <canvas id="equityChart"></canvas>
         </div>
         <div class="journal-log" id="journalLog"><div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">No trades logged yet</div></div>
+        </div><!-- /journalNormalSec -->
+        <div id="journalFlowSec" style="display:none;padding-top:2px;"></div>
       </div>
     </div>
 
@@ -673,6 +704,7 @@ let journal  = [];
 let signalSummary = {};
 let portfolioData = { portfolio: null, open: [], trades: [] };
 let btMeta = null;
+let flowData = [];
 let patternStats = [];
 let journalView = 'all';   // 'all' | 'today' — journal stats scope
 let showChannel = false, showSMC = true;
@@ -1652,6 +1684,135 @@ async function switchPair(p) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// TRADE FLOW VIEW
+// ═══════════════════════════════════════════════════════════════
+async function renderFlowView() {
+  const sec = document.getElementById('journalFlowSec');
+  sec.innerHTML = '<div style="text-align:center;padding:20px;color:var(--muted);font-size:9px;letter-spacing:1px;">Loading…</div>';
+  try { flowData = await fetch('/api/trade-flow').then(r => r.json()); } catch { return; }
+
+  const fmt    = ms => ms ? new Date(ms).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—';
+  const fmtD   = ms => ms ? new Date(ms).toLocaleDateString([], {month:'short',day:'numeric'}) : '';
+  const fmtPx  = px => !px ? '—' : px >= 1000 ? '$'+px.toFixed(2) : px >= 1 ? '$'+px.toFixed(3) : '$'+px.toFixed(5);
+
+  // ── Pattern × Token breakdown ─────────────────────────────────
+  const bmap = {};
+  for (const r of flowData) {
+    if (!r.pt_outcome) continue;
+    const key = `${r.pattern}|${r.sym}|${r.tf}`;
+    if (!bmap[key]) bmap[key] = { pattern: r.pattern, sym: r.sym, tf: r.tf, t: 0, w: 0, l: 0, be: 0, pnl: 0 };
+    const b = bmap[key];
+    b.t++;
+    if (r.pt_outcome === 'tp1' || r.pt_outcome === 'tp2') b.w++;
+    else if (r.pt_outcome === 'sl') b.l++;
+    else if (r.pt_outcome === 'be') b.be++;
+    b.pnl += r.pnl_total || 0;
+  }
+  const brows = Object.values(bmap).sort((a,b) => b.pnl - a.pnl);
+  const tableHtml = brows.length ? `
+    <div class="flow-sec-lbl">PATTERN × TOKEN PERFORMANCE</div>
+    <table class="flow-table">
+      <thead><tr><th>PATTERN</th><th>TOKEN</th><th>TF</th><th>TRADES</th><th>W / L / BE</th><th>WIN %</th><th>TOTAL P&L</th></tr></thead>
+      <tbody>${brows.map(b => {
+        const wr = b.t ? (b.w/b.t*100).toFixed(0) : '—';
+        const wc = +wr >= 60 ? 'var(--green)' : +wr >= 45 ? 'var(--gold)' : 'var(--red)';
+        const pc = b.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+        return `<tr>
+          <td>${b.pattern}</td>
+          <td style="font-weight:700">${b.sym}</td>
+          <td style="color:var(--muted)">${b.tf}</td>
+          <td>${b.t}</td>
+          <td>${b.w}W / ${b.l}L${b.be?' / '+b.be+'BE':''}</td>
+          <td style="color:${wc};font-weight:700">${wr}%</td>
+          <td style="color:${pc};font-weight:700">${(b.pnl>=0?'+':'')}$${Math.abs(b.pnl).toFixed(2)}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>` : '';
+
+  // ── Trade timeline cards ──────────────────────────────────────
+  function step(dotCls, label, labelColor, time, price, noteHtml) {
+    return `<div class="tl-step">
+      <div class="tl-dot ${dotCls}"></div>
+      <div class="tl-content">
+        <span class="tl-label" style="color:${labelColor||'var(--text)'}">${label}</span>
+        ${time  ? `<span class="tl-time">${time}</span>` : ''}
+        ${price ? `<span class="tl-price">${price}</span>` : ''}
+        ${noteHtml||''}
+      </div>
+    </div><div class="tl-line"></div>`;
+  }
+
+  const cards = flowData.map(r => {
+    const col  = r.dir === 'long' ? 'var(--green)' : 'var(--red)';
+    const dirLbl = r.dir === 'long' ? '▲ LONG' : '▼ SHORT';
+    let steps = '';
+
+    steps += step('fired', 'FIRED', 'var(--muted)', `${fmt(r.detected_at)} · ${fmtD(r.detected_at)}`, null, '');
+
+    if (!r.entered_at && !r.pt_status) {
+      // Never entered — expired as pending
+      steps += step('expired', 'EXPIRED — price never reached entry zone', 'var(--muted)', null, null, '');
+    } else {
+      steps += step('entered', 'ENTERED', 'var(--gold)',
+        fmt(r.pt_opened_at || r.entered_at),
+        fmtPx(r.entry_price || r.entry), '');
+
+      if (r.pnl_tp1 > 0) {
+        steps += step('tp1', 'TP1 HIT', 'var(--green)', null, fmtPx(r.tp1),
+          `<span class="tl-note" style="color:var(--green)">+$${r.pnl_tp1.toFixed(2)} banked · SL moved to BE</span>`);
+      }
+
+      if (r.pt_status === 'closed') {
+        if (r.pt_outcome === 'tp2') {
+          steps += step('tp2', 'TP2 HIT ✓', 'var(--green)', fmt(r.pt_closed_at),
+            fmtPx(r.close_price || r.tp2),
+            `<span class="tl-note" style="color:var(--green)">+$${(r.pnl_final||0).toFixed(2)}</span>`);
+        } else if (r.pt_outcome === 'sl') {
+          const sp = r.pnl_final || 0;
+          steps += step('sl', 'SL HIT', 'var(--red)', fmt(r.pt_closed_at),
+            fmtPx(r.close_price || r.sl),
+            `<span class="tl-note" style="color:var(--red)">${sp>=0?'+':''}$${sp.toFixed(2)}</span>`);
+        } else if (r.pt_outcome === 'be') {
+          steps += step('be', 'BREAKEVEN', 'var(--muted)', fmt(r.pt_closed_at), null,
+            '<span class="tl-note">$0.00 — SL returned to TP1 level</span>');
+        } else if (r.pt_outcome === 'tp1') {
+          steps += step('tp1', 'CLOSED AT TP1', 'var(--green)', fmt(r.pt_closed_at), null,
+            `<span class="tl-note" style="color:var(--green)">+$${(r.pnl_total||0).toFixed(2)}</span>`);
+        }
+      } else if (r.pt_status === 'tp1') {
+        steps += step('watching', 'WATCHING TP2 / SL', 'var(--gold)', null, null,
+          `<span class="tl-note">TP2 @ ${fmtPx(r.tp2)}</span>`);
+      } else if (r.pt_status === 'open') {
+        steps += step('watching', 'WATCHING TP1', 'var(--gold)', null, null,
+          `<span class="tl-note">TP1 @ ${fmtPx(r.tp1)} · SL @ ${fmtPx(r.sl)}</span>`);
+      }
+    }
+    // Remove trailing line div
+    steps = steps.replace(/<div class="tl-line"><\/div>$/, '');
+
+    const tp  = r.pnl_total || 0;
+    const tpc = tp > 0 ? 'var(--green)' : tp < 0 ? 'var(--red)' : 'var(--muted)';
+    const tps = (tp>0?'+':'')+'$'+Math.abs(tp).toFixed(2);
+    const balLine = r.balance_before && r.balance_after
+      ? ` · $${r.balance_before.toFixed(2)} → <span style="font-weight:700;color:${tpc}">$${r.balance_after.toFixed(2)}</span>` : '';
+
+    return `<div class="trade-card">
+      <div class="tc-header">
+        <span style="color:${col};font-weight:700;font-size:10px;font-family:'JetBrains Mono',monospace">${dirLbl} ${r.sym}<span style="font-size:8px;opacity:.55"> · ${r.tf}</span></span>
+        <span style="font-size:9px;color:var(--muted)">${r.pattern}</span>
+        <span style="font-size:8px;color:var(--muted2)">${fmtD(r.detected_at)}</span>
+      </div>
+      <div class="tc-timeline">${steps}</div>
+      ${tp !== 0 ? `<div class="tc-footer">TOTAL P&L: <span style="color:${tpc};font-weight:700">${tps}</span>${balLine}</div>` : ''}
+    </div>`;
+  }).join('') || '<div style="text-align:center;padding:24px;color:var(--muted);font-size:9px;letter-spacing:1px;">No signal history yet — waiting for the scanner</div>';
+
+  const tlLbl = flowData.length
+    ? `<div class="flow-sec-lbl">TRADE TIMELINES — ${flowData.length} signal${flowData.length!==1?'s':''}</div>` : '';
+  sec.innerHTML = tableHtml + tlLbl + cards;
+}
+
 // JOURNAL
 // ═══════════════════════════════════════════════════════════════
 // Group journal rows into unique closed POSITIONS. Shared by the Journal
@@ -1675,7 +1836,11 @@ function computeClosedPositions(){
 function setJournalView(v){
   journalView = v;
   document.querySelectorAll('.jt-btn').forEach(b=>b.classList.toggle('active', b.dataset.jview===v));
-  renderJournal();
+  const isFlow = v === 'flow';
+  document.getElementById('journalNormalSec').style.display = isFlow ? 'none' : '';
+  document.getElementById('journalFlowSec').style.display   = isFlow ? '' : 'none';
+  if (isFlow) renderFlowView();
+  else renderJournal();
 }
 
 const _dateUTCStr   = t => { const d=new Date(t); return isNaN(d)?'':d.toISOString().slice(0,10); };

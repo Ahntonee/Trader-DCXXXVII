@@ -228,6 +228,26 @@ const upsertBacktestMeta = db.prepare(`
   UPDATE backtest_meta SET last_run_at=@last_run_at, status=@status, message=@message, row_count=@row_count WHERE id=1
 `);
 
+// ── Trade flow (signals + paper trade joined) ─────────────────────
+const getTradeFlow = db.prepare(`
+  SELECT
+    s.id, s.sym, s.tf, s.dir, s.pattern,
+    s.status, s.detected_at, s.entered_at, s.closed_at,
+    s.entry, s.entry_price, s.close_price, s.r_mult,
+    s.sl, s.tp1, s.tp2,
+    pt.risk_amount, pt.pnl_tp1, pt.pnl_final, pt.pnl_total,
+    pt.outcome    AS pt_outcome,
+    pt.status     AS pt_status,
+    pt.balance_before, pt.balance_after,
+    pt.opened_at  AS pt_opened_at,
+    pt.closed_at  AS pt_closed_at
+  FROM signals s
+  LEFT JOIN paper_trades pt ON pt.signal_id = s.id
+  WHERE s.pattern IS NOT NULL
+  ORDER BY s.detected_at DESC
+  LIMIT 300
+`);
+
 const getSignalSummary = db.prepare(`
   SELECT
     COUNT(*)                                                              AS total_fired,
@@ -306,6 +326,7 @@ module.exports = {
   insertBacktestResult,
   getBacktestResults,
   getBacktestMeta, upsertBacktestMeta,
+  getTradeFlow,
   getSignalSummary,
   getTodaySummary,
   getPortfolio, updatePortfolio, resetPortfolio,
