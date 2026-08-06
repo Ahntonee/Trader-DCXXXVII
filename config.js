@@ -60,6 +60,18 @@ const MTF_MAP      = { '15m': '1h', '1h': '4h', '4h': '1d', '1d': '1d' };
 const CANDLE_LIMIT = { '15m': 200, '1h': 200, '4h': 150, '1d': 100 };
 const EXPIRY_MINS  = { '15m': 120, '1h': 360, '4h': 960, '1d': 4320 };
 
+// ── Signal whitelist ──────────────────────────────────────────────
+// Only these pattern+timeframe combos are allowed to fire signals and
+// open paper trades. Any other detection is silently discarded.
+const SIGNAL_WHITELIST = new Set([
+  'Bear Engulfing at S/R|15m',
+  'Inv. Head & Shoulders|15m',
+  'Descending Triangle|4h',
+  'Rising Wedge|1h',
+  'Double Top|4h',
+  'Double Top|15m',
+]);
+
 // ── Scanner behaviour ─────────────────────────────────────────────
 const MAX_CORRELATED       = 2;   // max same-direction signals active simultaneously
 const SCAN_BATCH_SIZE      = 3;   // concurrent pairs per full-scan batch
@@ -72,4 +84,5 @@ module.exports = {
   CRYPTO_PAIRS, FOREX_PAIRS,
   TIMEFRAMES, MTF_MAP, CANDLE_LIMIT, EXPIRY_MINS,
   MAX_CORRELATED, SCAN_BATCH_SIZE, FAST_SCAN_BATCH_SIZE, BACKTEST_COOLDOWN_MS,
+  SIGNAL_WHITELIST,
 };

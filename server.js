@@ -4,7 +4,7 @@
 const {
   PORT, HOST, TWELVE_KEY, VALID_SYMBOL, VALID_INTERVAL, sanitizeLimit,
   CRYPTO_PAIRS, FOREX_PAIRS, TIMEFRAMES, MTF_MAP, CANDLE_LIMIT,
-  MAX_CORRELATED, BACKTEST_COOLDOWN_MS,
+  MAX_CORRELATED, BACKTEST_COOLDOWN_MS, SIGNAL_WHITELIST,
 } = require('./config');
 const {
   getLiveKlines, getLiveTicker, getForexKlines, getForexPrice,
@@ -90,6 +90,7 @@ wss.on('connection', ws => {
 // ═══════════════════════════════════════════════════════════════════
 
 async function processNewSignal(sig) {
+  if (!SIGNAL_WHITELIST.has(`${sig.pattern}|${sig.tf}`)) return;
   try {
     const allActive = db.getActiveSignals.all();
 
