@@ -65,26 +65,34 @@ function openTrade(sig, entryPrice) {
   }
 }
 
-// Called when TP1 is hit — 50% of position closed at +1R.
+// Called when TP1 is hit — full position closed at +1R.
+// Closing 100% here gives symmetric 1:1 R:R (win = risk_amount, loss = risk_amount).
 function hitTP1(sigId) {
   try {
     const t = db.getPaperTrade.get(sigId);
     if (!t || t.status !== 'open') return null;
 
-    const pnl    = +((t.risk_amount * 0.5)).toFixed(4); // 50% at +1R
+    const pnl    = +(t.risk_amount).toFixed(4); // full 1R banked
     const p      = db.getPortfolio.get();
     const newBal = +(p.balance + pnl).toFixed(4);
     const newPeak= Math.max(p.peak, newBal);
 
-    db.updatePaperTradeTP1.run({ signal_id: sigId, pnl_tp1: pnl });
+    // Close fully at TP1 — no split position trailing to TP2
+    db.updatePaperTradeClose.run({
+      signal_id: sigId, pnl_final: pnl, pnl_total: pnl,
+      balance_after: newBal, outcome: 'tp1', closed_at: Date.now(),
+    });
     db.updatePortfolio.run({
       balance: newBal, peak: newPeak,
-      total_pnl: +(p.total_pnl + pnl).toFixed(4),
-      wins: p.wins, losses: p.losses, be_trades: p.be_trades,
-      total_trades: p.total_trades, updated_at: Date.now(),
+      total_pnl:    +(p.total_pnl + pnl).toFixed(4),
+      wins:         p.wins + 1,
+      losses:       p.losses,
+      be_trades:    p.be_trades,
+      total_trades: p.total_trades + 1,
+      updated_at:   Date.now(),
     });
 
-    console.log(`[Portfolio] TP1  ${sigId} | +$${pnl.toFixed(2)} | bal $${newBal.toFixed(2)}`);
+    console.log(`[Portfolio] TP1  ${sigId} | +$${pnl.toFixed(2)} (1R full close) | bal $${newBal.toFixed(2)}`);
     return portfolioPayload();
   } catch (e) {
     console.warn('[Portfolio] hitTP1:', e.message);
