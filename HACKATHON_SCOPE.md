@@ -73,6 +73,15 @@ Estimated 22 days from today. Effort in focused days. Order matters: WP0–1 unb
 | **WP7** | **Hardening for demo/production claim** | Fix remaining items in §8 of Part‑1 follow-ups: structured logging, metrics endpoint, secrets rotation doc, dependency audit clean, backups of SQLite, uptime check | CI green incl. `npm audit`; restore-from-backup drill documented | 2 |
 | **WP8** | **Submission pack** | Repo README, architecture diagram, 3‑min video, `PRODUCTION_PATH.md`, CCDExplorer links, Checkpoint 1 entry | Self-review against Encode checklist the day before | 2 |
 
+### Progress log
+
+| Date | Done |
+|---|---|
+| 2026-11-17 | Project created on Encode, team group created, Week 1 report sent. Project name registered/approved as **"Apex Trading Tool"**. |
+| 2026-11-17 | **WP5 core built** ([audit.js](audit.js)): hash-chained append-only log with DB-level triggers, Merkle checkpoints, anchor verification; hooked into signal lifecycle + admin actions + boot (build/rule-set fingerprint); public `GET /v1/audit`, `/v1/audit/verify`, `/v1/audit/anchors[/:id/verify]`; admin `POST /v1/audit/checkpoint` and `/anchors/:id/tx`. 6 tests incl. tamper detection. |
+| 2026-11-17 | **WP1 prep built**: [agent-card.json](agent-card.json) (ERC‑8004 + A2A v1.0 shape per Concordium's Agent Card page), served byte-exact at `/.well-known/agent-card.json`, `GET /v1/agent-card/hash` returns the SHA‑256 to pin on-chain. Apache‑2.0 `LICENSE` added. |
+| **Blocked on owner** | Concordium ID verification, testnet wallet + faucet CCD, public hosting URL (card has `REPLACE-WITH-PUBLIC-HOST` placeholders), then `register` on CIS‑8004 testnet and add `concordium-badge` extension + `registrations` to the card (re-hash and `setAgentURI`). |
+
 Buffer ≈ 2 days. If time slips, **cut order**: WP4 → WP7 extras → WP3 polish. Never cut WP1, WP2, WP5, WP8.
 
 ### Architecture (target)

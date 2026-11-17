@@ -14,12 +14,15 @@ const express           = require('express');
 const http              = require('http');
 const { WebSocketServer } = require('ws');
 const path              = require('path');
+const fs                = require('fs');
 const db                = require('./db');
 const engine            = require('./signal-engine');
 const tg                = require('./telegram');
 const { runBacktest }   = require('./backtester');
 const portfolio         = require('./portfolio');
 const { requireAdmin, originAllowed, rateLimit, securityHeaders } = require('./security');
+const audit             = require('./audit');
+const crypto            = require('crypto');
 
 // Candle cache for structure-based trailing stop — keyed by pairId+tf
 const _candleCache = {};
@@ -168,6 +171,12 @@ async function processNewSignal(sig) {
       vol_regime:     sig.vol_regime      ?? null,
       size_mult:      sig.size_mult       ?? null,
     });
+    audit.append('signal_created', 'system', {
+      id: sig.id, pair: sig.pair_id, tf: sig.tf, dir: sig.dir, pattern: sig.pattern,
+      entry: sig.entry, sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2 ?? null,
+      confidence: sig.confidence, tier: sig.tier ?? null, htf_bias: sig.htf_bias ?? 'neutral',
+      adx: sig.adx ?? null, mtf_stack: !!sig.mtf_stack,
+    });
     broadcast({ type: 'new_signal', data: sig });
     broadcast({ type: 'summary_init', data: summaryPayload() });
     const tgMsg = tg.formatSignal(sig);
@@ -190,6 +199,11 @@ function handleSignalUpdate(sig, updates) {
       closed_at: updates.closed_at ?? null,
     });
     broadcast({ type: 'signal_update', id: sig.id, updates });
+    audit.append(`signal_${updates.status}`, 'system', {
+      id: sig.id, pair: sig.pair_id, tf: sig.tf, dir: sig.dir,
+      entry_price: updates.entry_price ?? sig.entry_price ?? null,
+      close_price: updates.close_price ?? null, r_mult: updates.r_mult ?? null,
+    });
 
     // ── ENTRY: open paper trade ───────────────────────────────────────
     if (updates.status === 'entered') {
@@ -415,6 +429,7 @@ function expireBlackoutSignals() {
       r_mult: null, entered_at: null, closed_at: Date.now(),
     });
     broadcast({ type: 'signal_update', id: sig.id, updates: { status: 'expired' } });
+    audit.append('signal_expired', 'system', { id: sig.id, reason: 'post-NY blackout' });
   }
   if (pending.length) {
     console.log(`[Blackout] Expired ${pending.length} pending signal(s) — 18 UTC blackout`);
@@ -549,6 +564,8 @@ app.get('/api/journal', (req, res) => {
 
 app.delete('/api/journal', ...adminOnly, (req, res) => {
   try {
+    // Log BEFORE destroying: the audit trail must survive the action it records.
+    audit.append('admin_journal_cleared', 'admin', { journal_rows: db.getFullJournal.all().length });
     db.clearJournal.run();
     broadcast({ type: 'journal_update', data: [] });
     broadcast({ type: 'summary_init', data: summaryPayload() });
@@ -587,6 +604,55 @@ app.get('/api/sessions', (req, res) => {
   });
 });
 
+// ── Accountability API (public, read-only) ─────────────────────────────
+// Anyone can pull the decision log and re-verify the hash chain themselves.
+app.use('/v1', rateLimit({ windowMs: 60_000, max: 120 }));
+app.get('/v1/audit', (req, res) => {
+  res.json({ head: audit.head(), entries: audit.list(+req.query.after || 0, +req.query.limit || 100) });
+});
+app.get('/v1/audit/verify', (req, res) => {
+  const from = Math.max(1, parseInt(req.query.from, 10) || 1);
+  const to   = parseInt(req.query.to, 10) || Number.MAX_SAFE_INTEGER;
+  const r = audit.verify(from, to);
+  res.status(r.ok ? 200 : 409).json(r);
+});
+app.get('/v1/audit/anchors', (req, res) => res.json(audit.anchors()));
+app.get('/v1/audit/anchors/:id/verify', (req, res) => {
+  const r = audit.verifyAnchor(parseInt(req.params.id, 10));
+  res.status(r.ok ? 200 : 409).json(r);
+});
+// Admin: summarise new log rows into a Merkle checkpoint ready to anchor on-chain.
+app.post('/v1/audit/checkpoint', ...adminOnly, (req, res) => {
+  try {
+    const cp = audit.createCheckpoint();
+    if (!cp) return res.json({ created: false, message: 'No new entries since last checkpoint' });
+    audit.append('audit_checkpoint', 'admin', { anchor_id: cp.id, from: cp.from_seq, to: cp.to_seq, root: cp.root });
+    res.json({ created: true, ...cp });
+  } catch (e) { res.status(409).json({ error: e.message }); }
+});
+// Admin: attach the on-chain transaction hash once the root has been submitted.
+app.post('/v1/audit/anchors/:id/tx', ...adminOnly, (req, res) => {
+  const tx = String(req.body?.tx_hash || '');
+  if (!/^[0-9a-fA-F]{64}$/.test(tx)) return res.status(400).json({ error: 'tx_hash must be 64 hex chars' });
+  audit.recordAnchorTx(parseInt(req.params.id, 10), tx.toLowerCase(), 'concordium-testnet');
+  res.json({ ok: true });
+});
+
+// Agent Card — served as the EXACT bytes on disk. The on-chain `metadata_hash`
+// is the SHA-256 of these bytes, so never re-serialise or transform them.
+const AGENT_CARD_PATH = path.join(__dirname, 'agent-card.json');
+function sendAgentCard(req, res) {
+  try {
+    const bytes = fs.readFileSync(AGENT_CARD_PATH);
+    res.set('Content-Type', 'application/json; charset=utf-8').set('Cache-Control', 'public, max-age=300').send(bytes);
+  } catch { res.status(404).json({ error: 'Agent card not published yet' }); }
+}
+app.get('/.well-known/agent-card.json', sendAgentCard);
+app.get('/v1/agent-card/hash', (req, res) => {
+  try { res.json({ sha256: crypto.createHash('sha256').update(fs.readFileSync(AGENT_CARD_PATH)).digest('hex') }); }
+  catch { res.status(404).json({ error: 'Agent card not published yet' }); }
+});
+
 // Health endpoint — required for Render/Docker deploy health checks
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), ts: Date.now() });
@@ -618,6 +684,7 @@ app.post('/api/portfolio/reset', ...adminOnly, (req, res) => {
     return res.status(400).json({ error: 'starting must be between 1 and 10,000,000' });
   if (!Number.isFinite(risk) || risk < 0.1 || risk > 5)
     return res.status(400).json({ error: 'risk_pct must be between 0.1 and 5' });
+  audit.append('admin_portfolio_reset', 'admin', { starting: start, risk_pct: risk });
   const data = portfolio.resetPortfolio(start, risk);
   if (data) { broadcast({ type: 'portfolio_update', data }); res.json({ ok: true, data }); }
   else res.status(500).json({ error: 'Reset failed' });
@@ -673,6 +740,7 @@ app.post('/api/backtest/run', ...adminOnly, async (req, res) => {
   }
   _backtestRunning = true;
   _backtestLastRun = Date.now();
+  audit.append('admin_backtest_started', 'admin', { pairs: pairs.length, timeframes: tfs });
   db.upsertBacktestMeta.run({ last_run_at: _backtestLastRun, status: 'running', message: null, row_count: 0 });
   broadcast({ type: 'backtest_meta', data: db.getBacktestMeta.get() });
   res.json({ started: true, message: 'Backtest started. Results will appear in the Backtest tab when complete.' });
@@ -714,6 +782,22 @@ async function start() {
   } catch (e) {
     console.warn('[Boot] Could not expire stale signals:', e.message);
   }
+
+  // Record exactly which build + rule-set is making decisions from now on.
+  try {
+    const cfg = require('./config');
+    audit.append('agent_start', 'system', {
+      version: require('./package.json').version,
+      node: process.version,
+      signal_whitelist_sha256: crypto.createHash('sha256').update([...cfg.SIGNAL_WHITELIST].sort().join('\n')).digest('hex'),
+      whitelist: [...cfg.SIGNAL_WHITELIST].sort(),
+      pairs: cfg.CRYPTO_PAIRS.length,
+      max_correlated: cfg.MAX_CORRELATED,
+    });
+    const v = audit.verify();
+    if (!v.ok) console.error(`[Audit] ⚠ CHAIN BROKEN at seq ${v.brokenAt}: ${v.reason}`);
+    else console.log(`[Audit] chain OK — ${v.checked} entries`);
+  } catch (e) { console.error('[Audit] boot check failed:', e.message); }
 
   // Immediately check pending signals against current price at boot
   setTimeout(async () => {

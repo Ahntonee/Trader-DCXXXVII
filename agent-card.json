@@ -1,0 +1,29 @@
+{
+  "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+  "name": "Apex Trading Tool",
+  "description": "Automated crypto chart-pattern signal agent. Publishes machine-readable, paper-traded research signals with a tamper-evident decision log. Informational only — not investment advice. Operated by an accountable owner verified through Concordium ID.",
+  "image": "https://REPLACE-WITH-PUBLIC-HOST/favicon.png",
+  "version": "3.0.0",
+  "provider": { "organization": "Apex Trading Tool", "url": "https://REPLACE-WITH-PUBLIC-HOST" },
+  "supportedInterfaces": [
+    { "url": "https://REPLACE-WITH-PUBLIC-HOST/v1", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "extensions": []
+  },
+  "defaultInputModes": ["application/json"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [
+    { "id": "get-signals", "name": "Get trade signals", "description": "Returns active crypto chart-pattern signals (entry, stop, target) with confidence and pattern metadata.", "tags": ["crypto", "signals", "research"] },
+    { "id": "verify-audit-log", "name": "Verify decision log", "description": "Returns the hash-chained decision log and lets any party re-verify it is untampered.", "tags": ["audit", "accountability", "eu-ai-act"] }
+  ],
+  "services": [
+    { "name": "A2A", "endpoint": "https://REPLACE-WITH-PUBLIC-HOST/.well-known/agent-card.json", "version": "1.0" },
+    { "name": "web", "endpoint": "https://REPLACE-WITH-PUBLIC-HOST/v1/audit", "version": "1.0" }
+  ],
+  "x402Support": false,
+  "active": true,
+  "registrations": []
+}

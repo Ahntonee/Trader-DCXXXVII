@@ -2,6 +2,7 @@
   "name": "apex-terminal",
   "version": "3.0.0",
   "description": "Apex Terminal — multi-exchange signal engine",
+  "license": "Apache-2.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

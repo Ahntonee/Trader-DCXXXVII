@@ -13,7 +13,7 @@ ENV NODE_ENV=production \
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY package*.json ./
-COPY *.js ./
+COPY *.js agent-card.json ./
 COPY public ./public
 
 # SQLite lives on a volume so journal/portfolio survive redeploys.
