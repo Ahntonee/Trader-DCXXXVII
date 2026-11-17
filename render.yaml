@@ -2,12 +2,23 @@ services:
   - type: web
     name: apex-terminal
     env: node
-    buildCommand: npm install
+    buildCommand: npm ci --omit=dev
     startCommand: node server.js
     plan: starter
+    healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
+      # SQLite must live on the persistent disk, NOT in the source tree.
+      - key: DB_PATH
+        value: /var/data/apex.db
+      # Required to use reset / clear-journal / backtest. Without it those
+      # endpoints return 503 in production (fail closed).
+      - key: ADMIN_TOKEN
+        generateValue: true
+      # Comma-separated extra origins allowed to open the WebSocket (optional).
+      - key: ALLOWED_ORIGINS
+        sync: false
       - key: TWELVE_DATA_KEY
         sync: false
       - key: TELEGRAM_TOKEN
@@ -16,5 +27,5 @@ services:
         sync: false
     disk:
       name: apex-data
-      mountPath: /opt/render/project/src
+      mountPath: /var/data
       sizeGB: 1

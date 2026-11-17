@@ -19,16 +19,30 @@ const engine            = require('./signal-engine');
 const tg                = require('./telegram');
 const { runBacktest }   = require('./backtester');
 const portfolio         = require('./portfolio');
+const { requireAdmin, originAllowed, rateLimit, securityHeaders } = require('./security');
 
 // Candle cache for structure-based trailing stop — keyed by pairId+tf
 const _candleCache = {};
 
 const app    = express();
 const server = http.createServer(app);
-const wss    = new WebSocketServer({ server });
+const wss    = new WebSocketServer({
+  server,
+  maxPayload: 1024, // clients never send us anything meaningful
+  // Block cross-site WebSocket hijacking: browsers must connect from our own origin.
+  verifyClient: ({ origin, req }) => originAllowed(origin, req.headers.host),
+});
 
+app.disable('x-powered-by');
+// Behind Render/other reverse proxy: trust one hop so req.ip is the real client.
+if (process.env.TRUST_PROXY || process.env.NODE_ENV === 'production') app.set('trust proxy', 1);
+app.use(securityHeaders);
 app.use(express.json({ limit: '16kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/api', rateLimit({ windowMs: 60_000, max: 240 }));
+// Tighter cap on admin/expensive routes (auth failures count too).
+const adminLimiter = rateLimit({ windowMs: 60_000, max: 10 });
+const adminOnly    = [adminLimiter, requireAdmin];
 
 // ═══════════════════════════════════════════════════════════════════
 // WEBSOCKET BROADCAST
@@ -183,110 +197,101 @@ function handleSignalUpdate(sig, updates) {
       if (pData) broadcast({ type: 'portfolio_update', data: pData });
     }
 
-    // ── TP1 HIT: lock 50% at +1.0R, move SL to TP1 price ────────────
-    // SL moves to TP1 (not entry) — if price returns to TP1 the remainder
-    // closes at breakeven; the TP1 win is already in the journal.
+    // ── ACCOUNTING MODEL (single source of truth) ───────────────────
+    // A trade is ONE position, closed ONCE:
+    //   • TP1 hit  → whole position closed at +1R  (journal win, stat win, paper trade closed)
+    //   • SL hit before TP1 → closed at -1R         (journal loss, stat loss, paper trade closed)
+    // After TP1 the signal keeps being tracked as an informational "runner"
+    // (trailing stop → TP2 or stop-out). Runner outcomes update the signal
+    // status and send an alert but NEVER write journal rows, pattern stats
+    // or portfolio P&L — that would count the same trade twice.
+
+    // ── TP1 HIT: close the position at +1.0R ─────────────────────────
     if (updates.status === 'tp1_hit') {
       const entryPx   = updates.entry_price ?? sig.entry_price ?? sig.entry;
       const exitPrice = updates.close_price || sig.tp1;
-
-      db.updateSignalSL.run({ id: sig.id, sl: sig.tp1 });
-      broadcast({ type: 'signal_update', id: sig.id, updates: { sl: sig.tp1 } });
-
       const pnlPct = entryPx > 0 ? ((exitPrice - entryPx) / entryPx * (sig.dir === 'long' ? 100 : -100)) : 0;
-      db.insertJournal.run({
-        signal_id: sig.id, sym: sig.sym, tf: sig.tf, dir: sig.dir,
-        pattern: sig.pattern, htf_bias: sig.htf_bias,
-        entry: entryPx, exit_price: exitPrice,
-        sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2,
-        outcome: 'tp1', r_mult: 1.0, pnl_pct: +pnlPct.toFixed(3),
-        confidence: sig.confidence,
-        opened_at: sig.entered_at || sig.detected_at,
-        closed_at: updates.closed_at,
-        date: new Date().toISOString().slice(0, 10),
+
+      let pd1 = null;
+      db.withTransaction(() => {
+        // Runner stop starts at the TP1 price (runner can't turn a banked win into a loss).
+        db.updateSignalSL.run({ id: sig.id, sl: sig.tp1 });
+        db.insertJournal.run({
+          signal_id: sig.id, sym: sig.sym, tf: sig.tf, dir: sig.dir,
+          pattern: sig.pattern, htf_bias: sig.htf_bias,
+          entry: entryPx, exit_price: exitPrice,
+          sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2,
+          outcome: 'tp1', r_mult: 1.0, pnl_pct: +pnlPct.toFixed(3),
+          confidence: sig.confidence,
+          opened_at: sig.entered_at || sig.detected_at,
+          closed_at: updates.closed_at,
+          date: new Date().toISOString().slice(0, 10),
+        });
+        db.upsertPatternStat.run({
+          pattern: sig.pattern, tf: sig.tf, asset_class: sig.asset_class || 'crypto',
+          wins: 1, losses: 0, total_r: 1.0, count: 1, win_rate: 1, avg_r: 1.0,
+        });
+        pd1 = portfolio.hitTP1(sig.id);
       });
-      db.upsertPatternStat.run({
-        pattern: sig.pattern, tf: sig.tf, asset_class: sig.asset_class || 'crypto',
-        wins: 1, losses: 0, total_r: 1.0, count: 1, win_rate: 1, avg_r: 1.0,
-      });
+      broadcast({ type: 'signal_update', id: sig.id, updates: { sl: sig.tp1 } });
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
       broadcast({ type: 'summary_init', data: summaryPayload() });
       tg.sendMessage(tg.formatTPHit(sig, 'tp1'));
-      console.log(`[TP1] ${sig.sym} — 50% locked +1.0R, SL moved to TP1 price (${sig.tp1})`);
-      const pd1 = portfolio.hitTP1(sig.id);
+      console.log(`[TP1] ${sig.sym} — position closed at +1.0R; runner stop moved to TP1 (${sig.tp1})`);
       if (pd1) broadcast({ type: 'portfolio_update', data: pd1 });
     }
 
-    // ── TP2 or BE CLOSE: handle remaining 50% ────────────────────────
-    // tp2_hit  → full win, close signal
-    // sl_hit after tp1_hit → price returned to TP1 (new SL) → breakeven
-    //   close on remainder. TP1 win already counted. Not a loss.
-    if (['tp2_hit', 'sl_hit'].includes(updates.status)) {
-      const wasTrailing = sig.status === 'tp1_hit';
-      const entryPx    = sig.entry_price ?? sig.entry;
-      const exitPrice  = updates.close_price ?? (updates.status === 'sl_hit' ? sig.sl : sig.tp2);
-
-      let rMult, outcome;
-
-      if (wasTrailing) {
-        if (updates.status === 'tp2_hit') {
-          const risk = Math.abs(sig.tp1 - sig.entry);
-          rMult   = risk > 0
-            ? Math.max(0, +((sig.dir === 'long' ? exitPrice - entryPx : entryPx - exitPrice) / risk).toFixed(3))
-            : 2.0;
-          outcome = 'tp2';
-        } else {
-          // Returned to TP1 — remainder exits at breakeven, signal closed cleanly
-          rMult   = 0;
-          outcome = 'be';
-        }
+    // ── RUNNER FINISH (after TP1): informational only ─────────────────
+    if (sig.status === 'tp1_hit' && ['tp2_hit', 'sl_hit'].includes(updates.status)) {
+      if (updates.status === 'tp2_hit') {
+        tg.sendMessage(tg.formatTPHit(sig, 'tp2'));
+        console.log(`[Runner] ${sig.sym} — reached TP2 (not counted: position already closed at TP1)`);
       } else {
-        rMult   = updates.status === 'sl_hit' ? -1 : 2.0;
-        outcome = updates.status.replace('_hit', '');
+        tg.sendMessage(`🔒 ${sig.sym} ${sig.tf} — runner stopped out at/above TP1 (trade already closed at +1R)`);
+        console.log(`[Runner] ${sig.sym} — runner stopped (not counted: position already closed at TP1)`);
       }
-
+    }
+    // ── STOP LOSS before TP1: full -1R loss ───────────────────────────
+    else if (updates.status === 'sl_hit' || (updates.status === 'tp2_hit' && sig.status !== 'tp1_hit')) {
+      // tp2_hit without a prior tp1_hit means price gapped through TP1 in one
+      // tick; the position still closes at TP1 (+1R), never at TP2.
+      const gappedThroughTP1 = updates.status === 'tp2_hit';
+      const entryPx   = sig.entry_price ?? sig.entry;
+      const exitPrice = gappedThroughTP1 ? sig.tp1 : (updates.close_price ?? sig.sl);
+      const rMult     = gappedThroughTP1 ? 1.0 : -1;
+      const outcome   = gappedThroughTP1 ? 'tp1' : 'sl';
       const pnlPct = entryPx > 0
         ? ((exitPrice - entryPx) / entryPx * (sig.dir === 'long' ? 100 : -100))
         : 0;
 
-      db.insertJournal.run({
-        signal_id: sig.id, sym: sig.sym, tf: sig.tf, dir: sig.dir,
-        pattern: sig.pattern, htf_bias: sig.htf_bias,
-        entry: entryPx, exit_price: exitPrice,
-        sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2,
-        outcome, r_mult: rMult, pnl_pct: +pnlPct.toFixed(3),
-        confidence: sig.confidence,
-        opened_at: sig.entered_at || sig.detected_at,
-        closed_at: updates.closed_at,
-        date: new Date().toISOString().slice(0, 10),
-      });
-
-      // BE close is neutral — don't skew pattern stats with a 0R entry
-      if (outcome !== 'be') {
+      let pdClose = null;
+      db.withTransaction(() => {
+        db.insertJournal.run({
+          signal_id: sig.id, sym: sig.sym, tf: sig.tf, dir: sig.dir,
+          pattern: sig.pattern, htf_bias: sig.htf_bias,
+          entry: entryPx, exit_price: exitPrice,
+          sl: sig.sl, tp1: sig.tp1, tp2: sig.tp2,
+          outcome, r_mult: rMult, pnl_pct: +pnlPct.toFixed(3),
+          confidence: sig.confidence,
+          opened_at: sig.entered_at || sig.detected_at,
+          closed_at: updates.closed_at,
+          date: new Date().toISOString().slice(0, 10),
+        });
         db.upsertPatternStat.run({
           pattern: sig.pattern, tf: sig.tf, asset_class: sig.asset_class || 'crypto',
           wins: rMult > 0 ? 1 : 0, losses: rMult < 0 ? 1 : 0,
           total_r: rMult, count: 1,
           win_rate: rMult > 0 ? 1 : 0, avg_r: rMult,
         });
-      }
+        pdClose = gappedThroughTP1
+          ? portfolio.hitTP1(sig.id)
+          : portfolio.closeTrade(sig.id, rMult, outcome);
+      });
 
       broadcast({ type: 'journal_update', data: db.getJournal.all() });
       broadcast({ type: 'summary_init', data: summaryPayload() });
-
-      // ── settle paper trade ──────────────────────────────────────────
-      const pdClose = portfolio.closeTrade(sig.id, rMult, outcome);
       if (pdClose) broadcast({ type: 'portfolio_update', data: pdClose });
-
-      if (wasTrailing && updates.status === 'sl_hit') {
-        tg.sendMessage(`🔒 ${sig.sym} ${sig.tf} — remainder closed at breakeven (TP1 win protected)`);
-        console.log(`[BE] ${sig.sym} — price returned to TP1, remainder closed at breakeven. TP1 win preserved.`);
-      } else if (updates.status === 'sl_hit') {
-        tg.sendMessage(tg.formatSLHit(sig));
-      } else {
-        tg.sendMessage(tg.formatTPHit(sig, outcome));
-        if (wasTrailing) console.log(`[TP2] ${sig.sym} — remaining 50% closed at +${rMult}R`);
-      }
+      tg.sendMessage(gappedThroughTP1 ? tg.formatTPHit(sig, 'tp1') : tg.formatSLHit(sig));
     }
   } catch (e) {
     console.warn('[handleSignalUpdate] error:', e.message);
@@ -542,14 +547,15 @@ app.get('/api/journal', (req, res) => {
   res.json(db.getJournal.all());
 });
 
-app.delete('/api/journal', (req, res) => {
+app.delete('/api/journal', ...adminOnly, (req, res) => {
   try {
     db.clearJournal.run();
     broadcast({ type: 'journal_update', data: [] });
     broadcast({ type: 'summary_init', data: summaryPayload() });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('[journal clear]', e);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -605,9 +611,14 @@ function toCSV(rows) {
 // ── Portfolio endpoints ───────────────────────────────────────────────────
 app.get('/api/portfolio', (req, res) => res.json(portfolio.portfolioPayload()));
 
-app.post('/api/portfolio/reset', (req, res) => {
+app.post('/api/portfolio/reset', ...adminOnly, (req, res) => {
   const { starting = 100, risk_pct = 1.0 } = req.body || {};
-  const data = portfolio.resetPortfolio(+starting, +risk_pct);
+  const start = Number(starting), risk = Number(risk_pct);
+  if (!Number.isFinite(start) || start < 1 || start > 10_000_000)
+    return res.status(400).json({ error: 'starting must be between 1 and 10,000,000' });
+  if (!Number.isFinite(risk) || risk < 0.1 || risk > 5)
+    return res.status(400).json({ error: 'risk_pct must be between 0.1 and 5' });
+  const data = portfolio.resetPortfolio(start, risk);
   if (data) { broadcast({ type: 'portfolio_update', data }); res.json({ ok: true, data }); }
   else res.status(500).json({ error: 'Reset failed' });
 });
@@ -636,7 +647,24 @@ app.get('/api/export/backtest', (req, res) => {
 // Trigger a full backtest run (can take several minutes)
 let _backtestRunning = false;
 let _backtestLastRun = 0;
-app.post('/api/backtest/run', async (req, res) => {
+app.post('/api/backtest/run', ...adminOnly, async (req, res) => {
+  // Validate the request against server-side allow-lists BEFORE touching state.
+  // Pairs may be sent as ids or {id} objects; anything unknown is ignored.
+  const body = req.body || {};
+  let pairs = CRYPTO_PAIRS;
+  if (body.pairs !== undefined) {
+    if (!Array.isArray(body.pairs)) return res.status(400).json({ error: 'pairs must be an array' });
+    const wanted = new Set(body.pairs.map(p => (p && typeof p === 'object' ? p.id : p)));
+    pairs = CRYPTO_PAIRS.filter(p => wanted.has(p.id));
+    if (!pairs.length) return res.status(400).json({ error: 'No valid pairs supplied' });
+  }
+  let tfs = ['1h', '4h'];
+  if (body.timeframes !== undefined) {
+    if (!Array.isArray(body.timeframes)) return res.status(400).json({ error: 'timeframes must be an array' });
+    tfs = TIMEFRAMES.filter(t => body.timeframes.includes(t));
+    if (!tfs.length) return res.status(400).json({ error: `timeframes must be among ${TIMEFRAMES.join(', ')}` });
+  }
+
   if (_backtestRunning) return res.status(409).json({ error: 'Backtest already running' });
   const sinceLastRun = Date.now() - _backtestLastRun;
   if (sinceLastRun < BACKTEST_COOLDOWN_MS) {
@@ -648,8 +676,6 @@ app.post('/api/backtest/run', async (req, res) => {
   db.upsertBacktestMeta.run({ last_run_at: _backtestLastRun, status: 'running', message: null, row_count: 0 });
   broadcast({ type: 'backtest_meta', data: db.getBacktestMeta.get() });
   res.json({ started: true, message: 'Backtest started. Results will appear in the Backtest tab when complete.' });
-  const pairs = req.body.pairs || CRYPTO_PAIRS;
-  const tfs   = req.body.timeframes || ['1h', '4h'];
   try {
     await runBacktest(pairs, tfs, (n, t, label) => {
       broadcast({ type: 'backtest_progress', done: n, total: t, label });
@@ -661,9 +687,9 @@ app.post('/api/backtest/run', async (req, res) => {
     broadcast({ type: 'backtest_done' });
   } catch (e) {
     console.error('[Backtest]', e);
-    db.upsertBacktestMeta.run({ last_run_at: Date.now(), status: 'failed', message: e.message, row_count: 0 });
+    db.upsertBacktestMeta.run({ last_run_at: Date.now(), status: 'failed', message: 'Backtest failed — see server logs', row_count: 0 });
     broadcast({ type: 'backtest_meta', data: db.getBacktestMeta.get() });
-    broadcast({ type: 'backtest_error', message: e.message });
+    broadcast({ type: 'backtest_error', message: 'Backtest failed — see server logs' });
   } finally {
     _backtestRunning = false;
   }
@@ -738,8 +764,28 @@ async function start() {
 process.on('unhandledRejection', reason => {
   console.warn('[unhandledRejection]', reason?.message ?? reason);
 });
+// An uncaught exception leaves the process in an unknown state (half-applied
+// DB writes, dangling timers). Log, shut down cleanly and let the supervisor
+// (Render / Docker restart policy) bring up a fresh process.
 process.on('uncaughtException', err => {
-  console.warn('[uncaughtException]', err?.message ?? err);
+  console.error('[uncaughtException] fatal:', err?.stack ?? err);
+  shutdown(1);
 });
+
+let _shuttingDown = false;
+function shutdown(code = 0) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  console.log('[Shutdown] closing server…');
+  const force = setTimeout(() => process.exit(code || 1), 8000);
+  force.unref();
+  try { wss.clients.forEach(c => c.terminate()); } catch { }
+  server.close(() => {
+    try { db.db.close(); } catch { }
+    process.exit(code);
+  });
+}
+process.on('SIGTERM', () => shutdown(0));
+process.on('SIGINT',  () => shutdown(0));
 
 start().catch(console.error);

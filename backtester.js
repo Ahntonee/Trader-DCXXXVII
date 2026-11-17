@@ -18,6 +18,10 @@ const { fetchHistoricalKlines, clearHistDeadSet } = require('./data-sources');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Round-trip taker fees (~0.1% x2) plus slippage. Override with BACKTEST_COST_PCT.
+const _costEnv = parseFloat(process.env.BACKTEST_COST_PCT);
+const ROUND_TRIP_COST_PCT = Number.isFinite(_costEnv) && _costEnv >= 0 ? _costEnv : 0.25;
+
 async function runBacktest(pairs, timeframes, onProgress) {
   const runAt = Date.now();
   clearHistDeadSet();
@@ -56,7 +60,10 @@ async function runBacktest(pairs, timeframes, onProgress) {
 
         let detected;
         try {
-          detected = await scanPair(slice, htfSlice, pair, tf, 'crypto');
+          // Replay clock = the bar's own timestamp (seconds → ms), so session
+          // gates/bonuses and signal ids match what the live engine would
+          // have seen at that moment, not the time this backtest is run.
+          detected = await scanPair(slice, htfSlice, pair, tf, 'crypto', curTime * 1000);
         } catch { continue; }
 
         for (const sig of detected) {
@@ -67,28 +74,33 @@ async function runBacktest(pairs, timeframes, onProgress) {
           let outcome = 'expired', rMult = 0;
           const lookAhead = Math.min(50, candles.length - i - 1);
 
+          // Payout model matches live trading: the whole position closes at
+          // TP1 (+1R) or the stop (-1R). SL is checked first, which is
+          // pessimistic when SL and TP1 fall inside the same candle.
           for (let j = 1; j <= lookAhead; j++) {
             const fc = candles[i + j];
-            // SL first (pessimistic for same-candle SL+TP conflicts).
-            // TP2 before TP1: if price reaches TP2 it has already passed TP1,
-            // so checking TP1 first would always shadow TP2.
             if (sig.dir === 'long') {
-              if (fc.low  <= sig.sl)             { outcome = 'sl';  rMult = -1.0; break; }
-              if (sig.tp2 && fc.high >= sig.tp2) { outcome = 'tp2'; rMult =  2.0; break; }
-              if (fc.high >= sig.tp1)            { outcome = 'tp1'; rMult =  1.0; break; }
+              if (fc.low  <= sig.sl)  { outcome = 'sl';  rMult = -1.0; break; }
+              if (fc.high >= sig.tp1) { outcome = 'tp1'; rMult =  1.0; break; }
             } else {
-              if (fc.high >= sig.sl)             { outcome = 'sl';  rMult = -1.0; break; }
-              if (sig.tp2 && fc.low  <= sig.tp2) { outcome = 'tp2'; rMult =  2.0; break; }
-              if (fc.low  <= sig.tp1)            { outcome = 'tp1'; rMult =  1.0; break; }
+              if (fc.high >= sig.sl)  { outcome = 'sl';  rMult = -1.0; break; }
+              if (fc.low  <= sig.tp1) { outcome = 'tp1'; rMult =  1.0; break; }
             }
             if (j >= barsExpiry) { outcome = 'expired'; break; }
+          }
+
+          // Trading costs (fees + slippage) charged on every filled trade,
+          // expressed in R: cost% of price / stop-distance% of price.
+          if (outcome === 'tp1' || outcome === 'sl') {
+            const riskFrac = Math.abs(sig.entry - sig.sl) / sig.entry;
+            if (riskFrac > 0) rMult -= ROUND_TRIP_COST_PCT / 100 / riskFrac;
           }
 
           if (!patternResults[sig.pattern]) {
             patternResults[sig.pattern] = { wins: 0, losses: 0, expired: 0, totalR: 0, count: 0, signals: [] };
           }
           const pr = patternResults[sig.pattern];
-          if (outcome === 'tp1' || outcome === 'tp2') pr.wins++;
+          if (outcome === 'tp1') pr.wins++;
           else if (outcome === 'sl') pr.losses++;
           else pr.expired++;
           pr.totalR += rMult;

@@ -796,8 +796,8 @@ function getMarketSessions() {
 // ── FIX 9: getSessionBonus — NY OPEN dead-code resolved ─────────────
 // Old code: LON-NY OVERLAP (13–16) fired first, making NY OPEN (13–15) unreachable.
 // Fixed: NY OPEN window split before OVERLAP continuation.
-function getSessionBonus() {
-  const h = new Date().getUTCHours();
+function getSessionBonus(nowMs = Date.now()) {
+  const h = new Date(nowMs).getUTCHours();
   // London open: strong momentum
   if (h >= 7  && h < 9)  return { bonus: 3,  label: '🇬🇧 LON OPEN' };
   // NY open + London overlap: peak of peak — best signals of the day
@@ -821,7 +821,7 @@ function getSessionBonus() {
 //   - Deep Asia (00–07 UTC): reversal patterns blocked — no institutional presence
 //   - Early London (07–08:30 UTC): reversal patterns blocked — direction not yet established
 // Returns { allowed: bool, reason: string|null }
-function isSessionAllowed(pattern, h) {
+function isSessionAllowed(pattern, h, mins = new Date().getUTCMinutes()) {
   const isReversal = REVERSAL_PATTERNS.has(pattern);
 
   // Post-NY wind-down: hard block everything
@@ -835,7 +835,6 @@ function isSessionAllowed(pattern, h) {
 
   // Fractional hour check for 8:30 cutoff using minutes
   if (h === 8) {
-    const mins = new Date().getUTCMinutes();
     if (mins < 30 && isReversal) return { allowed: false, reason: 'early LON — no reversals' };
   }
 
@@ -862,7 +861,11 @@ function checkRetestZone(neckline, close, dir, atr) {
 
 // ─── MASTER SIGNAL SCAN ─────────────────────────────────────────────
 
-async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
+// `nowMs` is the evaluation clock. Live scans use the wall clock; the
+// backtester passes the candle's own timestamp so session gates, session
+// bonuses, ids and expiry reflect the bar being replayed — never the
+// time the backtest happens to run (look-ahead / time-of-run bias).
+async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto', nowMs = Date.now()) {
   const signals = [];
   if (cs.length < 100) return signals;
 
@@ -929,7 +932,9 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
   if (!rawPatterns.length) return signals;
 
   const close = cs[cs.length - 1].close;
-  const h     = new Date().getUTCHours();
+  const evalDate = new Date(nowMs);
+  const h     = evalDate.getUTCHours();
+  const mins  = evalDate.getUTCMinutes();
 
   // ── 3. Score each pattern ────────────────────────────────────────────
   for (const raw of rawPatterns) {
@@ -940,7 +945,7 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     if (tf === '15m' && REVERSAL_PATTERNS.has(raw.pattern)) continue;
 
     // ── FIX 5: Session gate — hard block before scoring ──────────────
-    const sessionGate = isSessionAllowed(raw.pattern, h);
+    const sessionGate = isSessionAllowed(raw.pattern, h, mins);
     if (!sessionGate.allowed) continue;
 
     // ── FIX 1: HTF bias — mandatory hard requirement ──────────────────
@@ -1012,7 +1017,7 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     }
 
     // ── Build confidence score ────────────────────────────────────────
-    const sessionBonus = getSessionBonus();
+    const sessionBonus = getSessionBonus(nowMs);
     let conf = raw.conf;
     conf += emaCheck.score;
     conf += macdScore;
@@ -1136,10 +1141,10 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
     const isConfirmedEntry = entryMode.includes('CONFIRMED');
     if (!isConfirmedEntry && distToEntry > atr * 1.5) continue;
 
-    const expiresAt = Date.now() + (EXPIRY_MINS[tf] || 360) * 60 * 1000;
+    const expiresAt = nowMs + (EXPIRY_MINS[tf] || 360) * 60 * 1000;
 
     signals.push({
-      id: `${pair.id}_${dir}_${raw.pattern.replace(/[^a-zA-Z0-9]/g,'')}_${tf}_${Math.floor(Date.now()/3600000)}`,
+      id: `${pair.id}_${dir}_${raw.pattern.replace(/[^a-zA-Z0-9]/g,'')}_${tf}_${Math.floor(nowMs/3600000)}`,
       pair_id:        pair.id,
       sym:            pair.sym,
       tf,
@@ -1156,7 +1161,7 @@ async function scanPair(cs, htfCandles, pair, tf, assetClass = 'crypto') {
       adx:            adxResult.adx,
       filters:        filterParts,
       status:         'pending',
-      detected_at:    Date.now(),
+      detected_at:    nowMs,
       expires_at:     expiresAt,
       dec:            pair.dec || 4,
       hist_win_rate:  histBonus.winRate,

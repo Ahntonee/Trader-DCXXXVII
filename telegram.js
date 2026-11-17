@@ -6,16 +6,28 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const BASE = `https://api.telegram.org/bot${TOKEN}`;
 
-async function sendMessage(text) {
+async function sendMessage(text, attempt = 0) {
   if (!TOKEN || !CHAT_ID || TOKEN === 'your_telegram_bot_token_here') return;
   try {
-    await fetch(`${BASE}/sendMessage`, {
+    const res = await fetch(`${BASE}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: 'HTML' }),
+      timeout: 10_000,
     });
+    if (res.status === 429 && attempt < 2) {           // Telegram flood control
+      const j = await res.json().catch(() => ({}));
+      const wait = Math.min((j.parameters?.retry_after || 2), 30) * 1000;
+      await new Promise(r => setTimeout(r, wait));
+      return sendMessage(text, attempt + 1);
+    }
+    if (!res.ok) console.warn(`[Telegram] Send failed: HTTP ${res.status}`);
   } catch (e) {
     console.warn('[Telegram] Send failed:', e.message);
+    if (attempt < 2) {
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+      return sendMessage(text, attempt + 1);
+    }
   }
 }
 
@@ -32,8 +44,8 @@ function formatSignal(sig) {
     ``,
     `📍 <b>ENTRY:</b>  ${sig.entry.toFixed(sig.dec || 4)}`,
     `🛑 <b>STOP:</b>   ${sig.sl.toFixed(sig.dec || 4)}  (–${rrRisk}%)`,
-    `✅ <b>TP1:</b>    ${sig.tp1.toFixed(sig.dec || 4)}  (+${rrTp1}%)  → close 60%`,
-    rrTp2 ? `🎯 <b>TP2:</b>    ${sig.tp2.toFixed(sig.dec || 4)}  (+${rrTp2}%)  → close rest` : '',
+    `✅ <b>TP1:</b>    ${sig.tp1.toFixed(sig.dec || 4)}  (+${rrTp1}%)  → close full position (+1R)`,
+    rrTp2 ? `🎯 <b>TP2:</b>    ${sig.tp2.toFixed(sig.dec || 4)}  (+${rrTp2}%)  → optional runner target` : '',
     ``,
     `📊 Pattern: ${sig.pattern}${sig.candle_pattern ? ' · ' + sig.candle_pattern : ''}`,
     `🔎 Filters: ${sig.filters || '—'}`,
@@ -47,7 +59,10 @@ function formatSignal(sig) {
 
 function formatTPHit(sig, level) {
   const emoji = level === 'tp1' ? '✅' : '🎯';
-  return `${emoji} <b>TP${level === 'tp1' ? '1' : '2'} HIT</b> — ${sig.sym} [${sig.tf}]\nPattern: ${sig.pattern}\nMove SL to ${level === 'tp1' ? 'breakeven' : 'TP1'}`;
+  const note = level === 'tp1'
+    ? 'Position closed at +1R. Optional runner: stop moves to TP1.'
+    : 'Runner reached TP2 (trade was already closed at +1R).';
+  return `${emoji} <b>TP${level === 'tp1' ? '1' : '2'} HIT</b> — ${sig.sym} [${sig.tf}]\nPattern: ${sig.pattern}\n${note}`;
 }
 
 function formatSLHit(sig) {

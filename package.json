@@ -1,11 +1,12 @@
 {
   "name": "apex-terminal",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Apex Terminal — multi-exchange signal engine",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node --test test/"
   },
   "dependencies": {
     "express": "^4.18.2",

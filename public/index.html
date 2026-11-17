@@ -2048,10 +2048,29 @@ function renderPortfolio() {
   }
 }
 
+// Admin actions (reset / clear / backtest) need the server's ADMIN_TOKEN.
+// It is kept in sessionStorage only (cleared when the tab closes).
+async function adminFetch(url, opts = {}) {
+  const get = () => { try { return sessionStorage.getItem('apexAdminToken') || ''; } catch { return ''; } };
+  let token = get();
+  if (!token) {
+    token = (prompt('Admin token required for this action:') || '').trim();
+    if (!token) throw new Error('Admin token required');
+    try { sessionStorage.setItem('apexAdminToken', token); } catch { }
+  }
+  const res = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } });
+  if (res.status === 401 || res.status === 403 || res.status === 503) {
+    try { sessionStorage.removeItem('apexAdminToken'); } catch { }
+    const j = await res.json().catch(() => ({}));
+    throw new Error(j.error || 'Not authorized');
+  }
+  return res;
+}
+
 async function resetPortfolio() {
   if (!confirm('Reset portfolio to $100? This will close all open paper trades.')) return;
   try {
-    const res = await fetch('/api/portfolio/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ starting: 100, risk_pct: 1.0 }) });
+    const res = await adminFetch('/api/portfolio/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ starting: 100, risk_pct: 1.0 }) });
     const j = await res.json();
     if (j.ok) { portfolioData = j.data; renderPortfolio(); showAlert('Portfolio reset to $100', 'entry'); }
   } catch (e) { console.error('Reset failed', e); }
@@ -2079,7 +2098,7 @@ function updateMiniStrip(){
 async function clearJournal() {
   if (!confirm('Clear all journal data? This deletes every logged trade from the database.')) return;
   try {
-    const res = await fetch('/api/journal', { method: 'DELETE' });
+    const res = await adminFetch('/api/journal', { method: 'DELETE' });
     if (!res.ok) throw new Error('Server error');
     journal = [];
     renderJournal();
@@ -2151,9 +2170,11 @@ async function startBacktest() {
   btn.disabled=true; btn.innerHTML='<span class="material-symbols-rounded" style="font-size:13px">hourglass_top</span> RUNNING…';
   document.getElementById('btProgress').style.display='block';
   document.getElementById('btResultsTable').style.display='none';
+  const resetBtn=()=>{ btn.disabled=false; btn.innerHTML='<span class="material-symbols-rounded" style="font-size:13px">play_arrow</span> RUN BACKTEST'; document.getElementById('btProgress').style.display='none'; };
   try {
-    await fetch('/api/backtest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pairs:allPairs.crypto,timeframes:['1h','4h']})});
-  } catch(e) { btn.disabled=false; btn.innerHTML='<span class="material-symbols-rounded" style="font-size:13px">play_arrow</span> RUN BACKTEST'; }
+    const res = await adminFetch('/api/backtest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pairs:allPairs.crypto.map(p=>p.id),timeframes:['1h','4h']})});
+    if (!res.ok) { const j=await res.json().catch(()=>({})); resetBtn(); alert('Backtest not started: '+(j.error||res.status)); }
+  } catch(e) { resetBtn(); alert('Backtest not started: '+e.message); }
 }
 
 function updateBacktestProgress(done,total,label) {
